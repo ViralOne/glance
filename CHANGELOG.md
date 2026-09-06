@@ -53,7 +53,7 @@ First public release.
 - Polar integration for revenue next to traffic, with first-touch attribution
   through `data-attribution` and `glance.attribution()`.
 - Single static binary with the UI embedded, Docker image on
-  `ghcr.io/chrisgreg/glance`, compose files for local use and Dokploy.
+  `ghcr.io/ViralOne/glance`, compose files for local use and Dokploy.
 
-[Unreleased]: https://github.com/chrisgreg/glance/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/chrisgreg/glance/releases/tag/v1.0.0
+[Unreleased]: https://github.com/ViralOne/glance/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ViralOne/glance/releases/tag/v1.0.0

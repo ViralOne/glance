@@ -4,9 +4,9 @@
   <h1 align="center">Glance</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/github/go-mod/go-version/chrisgreg/glance?filename=server%2Fgo.mod" alt="Go version" />
-  <img src="https://img.shields.io/github/license/chrisgreg/glance" alt="License" />
-  <img src="https://github.com/chrisgreg/glance/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  <img src="https://img.shields.io/github/go-mod/go-version/ViralOne/glance?filename=server%2Fgo.mod" alt="Go version" />
+  <img src="https://img.shields.io/github/license/ViralOne/glance" alt="License" />
+  <img src="https://github.com/ViralOne/glance/actions/workflows/ci.yml/badge.svg" alt="CI" />
 </p>
 
 A tiny, self-hosted web analytics service. The useful stuff at a glance: visitors, page views, top pages, referrers, countries, devices and simple custom events. Not a product analytics platform.
@@ -34,14 +34,14 @@ The snippet posts one small JSON body per page view (site id, URL, referrer, scr
 ## Quick start (Docker)
 
 ```bash
-git clone https://github.com/chrisgreg/glance && cd glance
+git clone https://github.com/ViralOne/glance && cd glance
 cp .env.example .env          # set GLANCE_ADMIN_USER and GLANCE_ADMIN_PASSWORD
 mkdir -p data && chown 1000:1000 data   # Linux hosts only; the container runs as uid 1000
-docker compose up -d --build   # or drop --build to pull ghcr.io/chrisgreg/glance
+docker compose up -d --build   # or drop --build to pull ghcr.io/ViralOne/glance
 open http://localhost:8082
 ```
 
-Prebuilt images are published to `ghcr.io/chrisgreg/glance` on every release: `latest`, `1`, `1.0`, `1.0.0` and so on for linux/amd64 and linux/arm64.
+Prebuilt images are published to `ghcr.io/ViralOne/glance` on every release: `latest`, `1`, `1.0`, `1.0.0` and so on for linux/amd64 and linux/arm64.
 
 Add a website, click **Tracking code**, and paste the snippet before `</head>`. Data appears as soon as you open the dashboard.
 

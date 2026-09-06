@@ -12,17 +12,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/auth"
-	"github.com/chrisgreg/glance/server/internal/database"
-	"github.com/chrisgreg/glance/server/internal/events"
-	"github.com/chrisgreg/glance/server/internal/favicons"
-	"github.com/chrisgreg/glance/server/internal/polar"
-	"github.com/chrisgreg/glance/server/internal/rollup"
-	"github.com/chrisgreg/glance/server/internal/searchconsole"
-	"github.com/chrisgreg/glance/server/internal/settings"
-	"github.com/chrisgreg/glance/server/internal/sites"
-	"github.com/chrisgreg/glance/server/internal/stats"
-	"github.com/chrisgreg/glance/server/internal/tokens"
+	"github.com/ViralOne/glance/server/internal/auth"
+	"github.com/ViralOne/glance/server/internal/database"
+	"github.com/ViralOne/glance/server/internal/events"
+	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/polar"
+	"github.com/ViralOne/glance/server/internal/revenue"
+	"github.com/ViralOne/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/searchconsole"
+	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/sites"
+	"github.com/ViralOne/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/stripe"
+	"github.com/ViralOne/glance/server/internal/tokens"
 )
 
 func newServer(t *testing.T, user, pass string) *Server {
@@ -33,12 +35,15 @@ func newServer(t *testing.T, user, pass string) *Server {
 	}
 	t.Cleanup(func() { db.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	revStore := revenue.NewStore(db)
 	return &Server{
 		DB: db, Log: log, Sites: sites.New(db), Settings: settings.New(db), Writer: events.NewWriter(db, log),
 		Stats: stats.New(db), Favicons: favicons.New(db), Admin: auth.NewAdmin(user, pass, auth.NewSessionStore(db)),
-		Tokens: tokens.New(db), RetentionDays: 7,
-		Google: searchconsole.NewService(searchconsole.NewStore(db), searchconsole.NewClient("", ""), log),
-		Polar:  polar.NewService(polar.NewStore(db), polar.NewClient(), log),
+		Tokens: tokens.New(db), RetentionDays: 7, TrustedProxyHops: 1,
+		Google:  searchconsole.NewService(searchconsole.NewStore(db), searchconsole.NewClient("", ""), log),
+		Revenue: revStore,
+		Polar:   polar.NewService(revStore, polar.NewClient(), log),
+		Stripe:  stripe.NewService(revStore, stripe.NewClient(), log),
 	}
 }
 
@@ -130,7 +135,6 @@ func TestIngestRollupStats(t *testing.T) {
 			t.Fatalf("collect: %d", rr.Code)
 		}
 	}
-	s.TrustProxy = true
 	// Visitor A: three pageviews and an event. Visitor B: one pageview from Google on a phone.
 	hit(chromeMac, "1.1.1.1", "https://example.com/", "", "Europe/London", "pageview")
 	hit(chromeMac, "1.1.1.1", "https://example.com/pricing?x=1", "https://example.com/", "Europe/London", "pageview")
@@ -146,8 +150,23 @@ func TestIngestRollupStats(t *testing.T) {
 	}
 	var raw int
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&raw)
-	if raw != 5 {
-		t.Fatalf("raw events: want 5, got %d", raw)
+	// Five human events, plus the crawler hit which is now recorded under its
+	// own kind rather than dropped: knowing Googlebot came is worth a row, and
+	// it is excluded from every human aggregate.
+	if raw != 6 {
+		t.Fatalf("raw events: want 6, got %d", raw)
+	}
+	var botName string
+	if err := s.DB.QueryRow(`SELECT name FROM events WHERE kind = 'bot'`).Scan(&botName); err != nil {
+		t.Fatalf("crawler hit not recorded: %v", err)
+	}
+	if botName != "Googlebot" {
+		t.Fatalf("crawler name: %q", botName)
+	}
+	var botVisitors int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM events WHERE kind = 'bot' AND visitor != ''`).Scan(&botVisitors)
+	if botVisitors != 0 {
+		t.Fatal("a crawler must not be given a visitor hash")
 	}
 	var ipLeak int
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM events WHERE visitor LIKE '%1.1.1.1%'`).Scan(&ipLeak)

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // Service ties the store and client together: the connect handshake,

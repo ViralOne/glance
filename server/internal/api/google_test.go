@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/searchconsole"
+	"github.com/ViralOne/glance/server/internal/searchconsole"
 )
 
 // fakeGoogle stands in for the OAuth and Search Console endpoints.

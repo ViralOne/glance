@@ -75,7 +75,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          go build -trimpath -ldflags="-s -w -X github.com/chrisgreg/glance/server/internal/api.Version=${GITHUB_REF_NAME}" -o glance ./cmd/glance
+          go build -trimpath -ldflags="-s -w -X github.com/ViralOne/glance/server/internal/api.Version=${GITHUB_REF_NAME}" -o glance ./cmd/glance
           tar -czf "glance_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}.tar.gz" glance
       - uses: actions/upload-artifact@v4
         with:

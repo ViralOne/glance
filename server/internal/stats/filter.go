@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
-	"github.com/chrisgreg/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/rollup"
 )
 
 // Filters narrows a view to the visitors who matched every entry: a

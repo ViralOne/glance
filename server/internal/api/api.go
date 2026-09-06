@@ -20,18 +20,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/auth"
-	"github.com/chrisgreg/glance/server/internal/enrich"
-	"github.com/chrisgreg/glance/server/internal/events"
-	"github.com/chrisgreg/glance/server/internal/favicons"
-	"github.com/chrisgreg/glance/server/internal/mcp"
-	"github.com/chrisgreg/glance/server/internal/polar"
-	"github.com/chrisgreg/glance/server/internal/rollup"
-	"github.com/chrisgreg/glance/server/internal/searchconsole"
-	"github.com/chrisgreg/glance/server/internal/settings"
-	"github.com/chrisgreg/glance/server/internal/sites"
-	"github.com/chrisgreg/glance/server/internal/stats"
-	"github.com/chrisgreg/glance/server/internal/tokens"
+	"github.com/ViralOne/glance/server/internal/auth"
+	"github.com/ViralOne/glance/server/internal/enrich"
+	"github.com/ViralOne/glance/server/internal/events"
+	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/geo"
+	"github.com/ViralOne/glance/server/internal/mcp"
+	"github.com/ViralOne/glance/server/internal/polar"
+	"github.com/ViralOne/glance/server/internal/ratelimit"
+	"github.com/ViralOne/glance/server/internal/revenue"
+	"github.com/ViralOne/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/searchconsole"
+	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/sites"
+	"github.com/ViralOne/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/stripe"
+	"github.com/ViralOne/glance/server/internal/tokens"
+	"github.com/ViralOne/glance/server/internal/vitals"
 )
 
 // Version is the server version, overridden at build time via -ldflags.
@@ -57,15 +62,32 @@ type Server struct {
 	Admin    *auth.Admin
 	Web      http.Handler
 	Now      func() time.Time
-	// TrustProxy reads the client IP from X-Forwarded-For (set by Traefik).
+	// TrustProxy trusts the reverse proxy's X-Forwarded-Proto when rebuilding
+	// absolute URLs (OAuth redirects, webhook URLs).
 	TrustProxy bool
+	// TrustedProxyHops is how many proxies sit in front of Glance; see clientIP.
+	TrustedProxyHops int
+	// AllowLocalEvents accepts development page hosts from public clients.
+	// Off by default: the page host is client-supplied, so allowing it from
+	// anywhere bypasses the site-domain check for every site.
+	AllowLocalEvents bool
+	// CollectLimiter caps events per client address; LoginLimiter caps login
+	// attempts. Either may be nil, which disables that limit.
+	CollectLimiter *ratelimit.Limiter
+	LoginLimiter   *ratelimit.Limiter
+	// Geo resolves city and region from the client IP when a MaxMind-format
+	// database is configured. Nil means fall back to the time zone.
+	Geo *geo.Reader
 	// MCPToken grants read-only access to /mcp when set.
 	MCPToken string
 	Tokens   *tokens.Store
 	// Google links sites to Search Console for search terms.
 	Google *searchconsole.Service
-	// Polar links sites to a Polar organisation for revenue.
-	Polar *polar.Service
+	// Revenue holds orders from every payment provider; Polar and Stripe
+	// fetch into it.
+	Revenue *revenue.Store
+	Polar   *polar.Service
+	Stripe  *stripe.Service
 	// Retention defaults and whether the environment pins them.
 	RetentionDays    int
 	RetentionFromEnv bool
@@ -82,14 +104,6 @@ func (s *Server) searchStore() *searchconsole.Store {
 		return nil
 	}
 	return s.Google.Store
-}
-
-// polarStore is nil when no Polar service is wired (tests).
-func (s *Server) polarStore() *polar.Store {
-	if s.Polar == nil {
-		return nil
-	}
-	return s.Polar.Store
 }
 
 func (s *Server) retentionDaysCtx(ctx context.Context) int {
@@ -163,12 +177,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/google/sync", s.adminAuth(s.googleSync))
 	mux.Handle("GET /api/v1/sites/{id}/search-terms", s.adminAuth(s.searchTerms))
 	mux.HandleFunc("GET "+googleCallbackPath, s.googleCallback)
-	mux.Handle("GET /api/v1/sites/{id}/polar", s.adminAuth(s.polarGet))
-	mux.Handle("PUT /api/v1/sites/{id}/polar", s.adminAuth(s.polarConnect))
-	mux.Handle("DELETE /api/v1/sites/{id}/polar", s.adminAuth(s.polarDisconnect))
-	mux.Handle("POST /api/v1/sites/{id}/polar/sync", s.adminAuth(s.polarSync))
+	mux.Handle("GET /api/v1/sites/{id}/payments", s.adminAuth(s.paymentsGet))
+	mux.Handle("PUT /api/v1/sites/{id}/payments/{provider}", s.adminAuth(s.paymentsConnect))
+	mux.Handle("DELETE /api/v1/sites/{id}/payments/{provider}", s.adminAuth(s.paymentsDisconnect))
+	mux.Handle("POST /api/v1/sites/{id}/payments/{provider}/sync", s.adminAuth(s.paymentsSync))
 	mux.Handle("GET /api/v1/sites/{id}/revenue", s.adminAuth(s.siteRevenue))
-	mux.HandleFunc("POST /api/v1/polar/webhook/{id}", s.polarWebhook)
+	mux.HandleFunc("POST /api/v1/payments/{provider}/webhook/{id}", s.paymentsWebhook)
 	mux.Handle("GET /api/v1/favicon", s.adminAuth(s.refFavicon))
 	mux.Handle("GET /api/v1/status", s.adminAuth(s.status))
 	mux.Handle("GET /api/v1/settings", s.adminAuth(s.getSettings))
@@ -180,7 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/export", s.adminAuth(s.export))
 
 	// MCP (read-only) for AI agents: Streamable HTTP at /mcp.
-	mux.Handle("/mcp", s.mcpAuth(mcp.Handler(mcp.NewServer(mcp.Stores{RetentionDays: s.retentionDaysCtx, Sites: s.Sites, Stats: s.Stats, Search: s.searchStore(), Revenue: s.polarStore(), Now: s.Now}, Version), s.Log)))
+	mux.Handle("/mcp", s.mcpAuth(mcp.Handler(mcp.NewServer(mcp.Stores{RetentionDays: s.retentionDaysCtx, Sites: s.Sites, Stats: s.Stats, Search: s.searchStore(), Revenue: s.Revenue, Now: s.Now}, Version), s.Log)))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
@@ -306,6 +320,19 @@ type collectBody struct {
 	Width    int             `json:"w"`
 	TZ       string          `json:"tz"`
 	Props    json.RawMessage `json:"x"`
+	// Value is the numeric worth of a custom event, in whole minor units
+	// (cents) so a goal can be summed without floating-point drift.
+	Value *float64 `json:"v"`
+	// Vitals carries Core Web Vitals sampled by the snippet.
+	Vitals *vitalsBody `json:"cwv"`
+}
+
+type vitalsBody struct {
+	LCP  *float64 `json:"lcp"`
+	INP  *float64 `json:"inp"`
+	CLS  *float64 `json:"cls"`
+	TTFB *float64 `json:"ttfb"`
+	FCP  *float64 `json:"fcp"`
 }
 
 // collect accepts one event. It always answers 202 so the snippet cannot
@@ -313,8 +340,21 @@ type collectBody struct {
 func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	cors(w)
 	w.Header().Set("Cache-Control", "no-store")
+	ip := s.clientIP(r)
+	if !s.CollectLimiter.Allow(ip) {
+		s.Log.Debug("collect.dropped", "reason", "rate limited")
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	// Honour Do Not Track and Global Privacy Control. The snippet already
+	// checks both, but a proxy or extension may set them instead.
+	if enrich.OptedOut(r.Header) {
+		s.Log.Debug("collect.dropped", "reason", "dnt or gpc")
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	var in collectBody
-	b, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+	b, err := io.ReadAll(io.LimitReader(r.Body, 8192))
 	if err != nil || json.Unmarshal(b, &in) != nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -326,53 +366,132 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path, host := enrich.Path(in.URL)
-	if !enrich.LocalHost(host) && !enrich.SameSite(host, site.Domain) {
+	if !s.hostAllowed(host, site, ip) {
 		s.Log.Debug("collect.dropped", "reason", "host does not match site domain", "host", host, "domain", site.Domain)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	ua := enrich.ParseUA(r.UserAgent(), in.Width)
-	if ua.Bot {
-		s.Log.Debug("collect.dropped", "reason", "bot user agent", "ua", r.UserAgent())
+	if site.ExcludesPath(path) {
+		s.Log.Debug("collect.dropped", "reason", "path excluded by site settings", "path", path)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	if site.ExcludesIP(ip) {
+		s.Log.Debug("collect.dropped", "reason", "ip excluded by site settings")
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	ua := enrich.ParseUA(r.UserAgent(), in.Width)
 	now := s.Now()
+	// Bots are not visitors, but knowing which crawlers (and which AI
+	// crawlers) read the site is worth its own row, so they are recorded
+	// under their own kind and never mixed into human counts.
+	if ua.Bot {
+		s.Writer.Enqueue(events.Event{
+			SiteID: site.ID, At: now, Kind: events.KindBot, Name: ua.BotName, Path: path,
+			Country: enrich.Country(r.Header, in.TZ), Visitor: "",
+		})
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	salt, err := s.Settings.Salt(r.Context(), now)
 	if err != nil {
 		s.Log.Error("collect.salt_failed", "error", err.Error())
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
-	utmSrc, utmCamp := enrich.UTM(in.URL)
+	utmSrc, utmCamp, utmMedium := enrich.UTM(in.URL)
+	visitor := events.VisitorHash(salt, site.ID, ip, r.UserAgent())
+	geo := s.geo(ip)
 	ev := events.Event{
 		SiteID: site.ID, At: now, Kind: events.KindPageview, Path: path,
-		RefHost: enrich.Referrer(in.Referrer, site.Domain), Country: enrich.Country(r.Header, in.TZ), Region: enrich.Region(in.TZ),
-		Device: ua.Device, Browser: ua.Browser, OS: ua.OS, UTMSrc: utmSrc, UTMCamp: utmCamp,
-		Visitor: events.VisitorHash(salt, site.ID, s.clientIP(r), r.UserAgent()),
+		RefHost: enrich.Referrer(in.Referrer, site.Domain), Country: enrich.CountryWith(r.Header, in.TZ, geo.Country),
+		Region: enrich.RegionWith(in.TZ, geo.Region), City: geo.City,
+		Device: ua.Device, Browser: ua.Browser, OS: ua.OS, UTMSrc: utmSrc, UTMCamp: utmCamp, UTMMedium: utmMedium,
+		Visitor: visitor,
 	}
 	if name := strings.TrimSpace(in.Name); name != "" && name != "pageview" {
 		if len(name) > 60 {
 			name = name[:60]
 		}
 		ev.Kind, ev.Name = events.KindEvent, name
+		ev.Props = enrich.Props(in.Props)
+		if in.Value != nil {
+			ev.Value = int64(*in.Value)
+		}
 	}
 	s.Writer.Enqueue(ev)
+	if in.Vitals != nil && ev.Kind == events.KindPageview {
+		s.enqueueVitals(site.ID, path, ua.Device, now, in.Vitals)
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (s *Server) clientIP(r *http.Request) string {
-	if s.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if i := strings.IndexByte(xff, ','); i > 0 {
-				xff = xff[:i]
-			}
-			return strings.TrimSpace(xff)
+// hostAllowed checks the page host against the site's own domain and any extra
+// domains it lists, then against development addresses.
+//
+// A development host is only honoured when the request itself comes from a
+// private address (or GLANCE_ALLOW_LOCAL_EVENTS is set), because the host
+// arrives in the request body: without that gate anyone who knows a site id
+// could post events claiming to be on "anything.test" and pollute the stats.
+func (s *Server) hostAllowed(host string, site sites.Site, ip string) bool {
+	if site.MatchesHost(host) {
+		return true
+	}
+	if !enrich.LocalHost(host) {
+		return false
+	}
+	return s.AllowLocalEvents || enrich.PrivateClient(ip)
+}
+
+func (s *Server) enqueueVitals(siteID, path, device string, at time.Time, v *vitalsBody) {
+	for metric, value := range map[string]*float64{
+		vitals.LCP: v.LCP, vitals.INP: v.INP, vitals.CLS: v.CLS, vitals.TTFB: v.TTFB, vitals.FCP: v.FCP,
+	} {
+		if value == nil || !vitals.Plausible(metric, *value) {
+			continue
 		}
-		if rip := r.Header.Get("X-Real-IP"); rip != "" {
-			return strings.TrimSpace(rip)
+		s.Writer.EnqueueVital(events.Vital{SiteID: siteID, At: at, Path: path, Device: device, Metric: metric, Value: *value})
+	}
+}
+
+// clientIP resolves the client address, honouring X-Forwarded-For only as far
+// as the number of proxies actually in front of Glance.
+//
+// Every proxy appends the address it saw, so with one proxy the header holds
+// just the client and with two it holds "client, proxy1". Counting from the
+// right therefore lands on the real client; counting from the left lands on
+// whatever the caller chose to send, which would let anyone forge a fresh IP
+// per request and multiply the unique-visitor count at will.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := peerIP(r)
+	hops := s.TrustedProxyHops
+	if hops <= 0 {
+		return peer
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		i := len(parts) - hops
+		if i < 0 {
+			// Fewer entries than trusted hops: the leftmost is the earliest
+			// address any trusted proxy vouched for.
+			i = 0
+		}
+		if ip := strings.TrimSpace(parts[i]); ip != "" {
+			return ip
 		}
 	}
+	if rip := strings.TrimSpace(r.Header.Get("X-Real-IP")); rip != "" {
+		return rip
+	}
+	return peer
+}
+
+// geo resolves a place from the client IP, or an empty place when no GeoIP
+// database is configured.
+func (s *Server) geo(ip string) geo.Place { return s.Geo.Lookup(ip) }
+
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

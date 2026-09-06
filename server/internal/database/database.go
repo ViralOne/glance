@@ -13,7 +13,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/chrisgreg/glance/server/migrations"
+	"github.com/ViralOne/glance/server/migrations"
 )
 
 // DB is an alias so callers need not import database/sql just for the type.

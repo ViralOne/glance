@@ -15,8 +15,29 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/enrich"
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/enrich"
+	"github.com/ViralOne/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/revenue"
+)
+
+// Provider is this package's key in the shared orders table.
+const Provider = revenue.Polar
+
+// DefaultServer is Polar's production API.
+const DefaultServer = "https://api.polar.sh"
+
+// Re-exported so callers keep talking to one package about Polar.
+var (
+	ErrNotConnected = revenue.ErrNotConnected
+	ErrInvalid      = revenue.ErrInvalid
+)
+
+// Connection and Order are the provider-agnostic shapes.
+type (
+	Connection = revenue.Connection
+	Order      = revenue.Order
+	Store      = revenue.Store
+	Input      = revenue.Input
 )
 
 // Service runs the connect check, the pull and the webhook.
@@ -35,20 +56,12 @@ func NewService(store *Store, client *Client, log *slog.Logger) *Service {
 	return &Service{Store: store, Client: client, Log: log, Now: time.Now}
 }
 
-// Input is what the settings panel sends.
-type Input struct {
-	AccessToken   *string `json:"access_token"`
-	Server        *string `json:"server"`
-	ProductIDs    *string `json:"product_ids"`
-	WebhookSecret *string `json:"webhook_secret"`
-}
-
 // Connect validates the token against Polar and saves the connection. On
 // an existing connection, omitted secrets are kept.
 func (s *Service) Connect(ctx context.Context, siteID string, in Input) (Connection, error) {
-	c, err := s.Store.Get(ctx, siteID)
+	c, err := s.Store.Get(ctx, siteID, Provider)
 	if errors.Is(err, ErrNotConnected) {
-		c = Connection{SiteID: siteID, Server: DefaultServer}
+		c = Connection{SiteID: siteID, Provider: Provider, Server: DefaultServer}
 	} else if err != nil {
 		return Connection{}, err
 	}
@@ -89,7 +102,7 @@ func (s *Service) Connect(ctx context.Context, siteID string, in Input) (Connect
 		return Connection{}, err
 	}
 	go s.syncDetached(siteID)
-	return s.Store.Get(ctx, siteID)
+	return s.Store.Get(ctx, siteID, Provider)
 }
 
 // backfill is how far the first pull reaches.
@@ -101,7 +114,7 @@ const overlap = 30 * 24 * time.Hour
 
 // Sync pulls orders for one site and records the outcome.
 func (s *Service) Sync(ctx context.Context, siteID, domain string) error {
-	c, err := s.Store.Get(ctx, siteID)
+	c, err := s.Store.Get(ctx, siteID, Provider)
 	if err != nil {
 		return err
 	}
@@ -113,7 +126,7 @@ func (s *Service) Sync(ctx context.Context, siteID, domain string) error {
 	} else {
 		s.Log.Info("polar.synced", "site", siteID)
 	}
-	if merr := s.Store.MarkSynced(ctx, siteID, s.Now(), msg); merr != nil {
+	if merr := s.Store.MarkSynced(ctx, siteID, Provider, s.Now(), msg); merr != nil {
 		return merr
 	}
 	return err
@@ -121,7 +134,7 @@ func (s *Service) Sync(ctx context.Context, siteID, domain string) error {
 
 func (s *Service) pull(ctx context.Context, c Connection, domain string) error {
 	since := s.Now().Add(-backfill)
-	if latest, _ := s.Store.LatestOrderAt(ctx, c.SiteID); !latest.IsZero() {
+	if latest, _ := s.Store.LatestOrderAt(ctx, c.SiteID, Provider); !latest.IsZero() {
 		since = latest.Add(-overlap)
 	}
 	raw, err := s.Client.Orders(ctx, c.Server, c.AccessToken, c.Products(), since)
@@ -140,7 +153,7 @@ func (s *Service) pull(ctx context.Context, c Connection, domain string) error {
 func (s *Service) syncDetached(siteID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	c, err := s.Store.Get(ctx, siteID)
+	c, err := s.Store.Get(ctx, siteID, Provider)
 	if err != nil {
 		return
 	}
@@ -156,7 +169,7 @@ func (s *Service) domainOf(siteID string) string {
 
 // SyncStale pulls every connected site not refreshed within maxAge.
 func (s *Service) SyncStale(ctx context.Context, maxAge time.Duration) {
-	list, err := s.Store.List(ctx)
+	list, err := s.Store.ForProvider(ctx, Provider)
 	if err != nil {
 		return
 	}
@@ -187,7 +200,7 @@ func ParseOrder(r RawOrder, domain string) (Order, bool) {
 	if err != nil {
 		return Order{}, false
 	}
-	o := Order{OrderID: id, CreatedAt: created.UTC(), Status: r.str("status"), Paid: r.boolean("paid"), Currency: r.str("currency")}
+	o := Order{Provider: Provider, OrderID: id, CreatedAt: created.UTC(), Status: r.str("status"), Paid: r.boolean("paid"), Currency: r.str("currency")}
 	if o.Status == "paid" || o.Status == "refunded" || o.Status == "partially_refunded" {
 		o.Paid = true
 	}
@@ -207,7 +220,7 @@ func ParseOrder(r RawOrder, domain string) (Order, bool) {
 	}
 	landing := r.str("metadata", "attr_landing")
 	o.Ref = enrich.Referrer(r.str("metadata", "attr_ref"), domain)
-	o.Source, o.Campaign = enrich.UTM(landing)
+	o.Source, o.Campaign, _ = enrich.UTM(landing)
 	if u, err := url.Parse(landing); err == nil && landing != "" {
 		o.Landing = u.Path
 		if o.Landing == "" {

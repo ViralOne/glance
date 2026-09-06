@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // SessionStore persists admin sessions so a restart does not log the admin out.

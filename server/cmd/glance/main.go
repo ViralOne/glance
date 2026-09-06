@@ -14,21 +14,25 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/api"
-	"github.com/chrisgreg/glance/server/internal/auth"
-	"github.com/chrisgreg/glance/server/internal/config"
-	"github.com/chrisgreg/glance/server/internal/database"
-	"github.com/chrisgreg/glance/server/internal/events"
-	"github.com/chrisgreg/glance/server/internal/favicons"
-	"github.com/chrisgreg/glance/server/internal/ids"
-	"github.com/chrisgreg/glance/server/internal/polar"
-	"github.com/chrisgreg/glance/server/internal/rollup"
-	"github.com/chrisgreg/glance/server/internal/searchconsole"
-	"github.com/chrisgreg/glance/server/internal/settings"
-	"github.com/chrisgreg/glance/server/internal/sites"
-	"github.com/chrisgreg/glance/server/internal/stats"
-	"github.com/chrisgreg/glance/server/internal/tokens"
-	"github.com/chrisgreg/glance/server/internal/web"
+	"github.com/ViralOne/glance/server/internal/api"
+	"github.com/ViralOne/glance/server/internal/auth"
+	"github.com/ViralOne/glance/server/internal/config"
+	"github.com/ViralOne/glance/server/internal/database"
+	"github.com/ViralOne/glance/server/internal/events"
+	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/geo"
+	"github.com/ViralOne/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/polar"
+	"github.com/ViralOne/glance/server/internal/ratelimit"
+	"github.com/ViralOne/glance/server/internal/revenue"
+	"github.com/ViralOne/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/searchconsole"
+	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/sites"
+	"github.com/ViralOne/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/stripe"
+	"github.com/ViralOne/glance/server/internal/tokens"
+	"github.com/ViralOne/glance/server/internal/web"
 )
 
 func main() {
@@ -74,24 +78,38 @@ func run() error {
 	if google.Configured() {
 		log.Info("google.enabled", "callback", "/api/v1/google/callback")
 	}
-	polarSvc := polar.NewService(polar.NewStore(db), polar.NewClient(), log)
-	polarSvc.Domain = func(ctx context.Context, id string) string {
+	// Payment providers all write into one orders table.
+	domainOf := func(ctx context.Context, id string) string {
 		st, err := siteStore.Get(ctx, id)
 		if err != nil {
 			return ""
 		}
 		return st.Domain
 	}
+	revStore := revenue.NewStore(db)
+	polarSvc := polar.NewService(revStore, polar.NewClient(), log)
+	polarSvc.Domain = domainOf
+	stripeSvc := stripe.NewService(revStore, stripe.NewClient(), log)
+	stripeSvc.Domain = domainOf
+
+	geoDB := geo.Open(cfg.GeoIPPath, log)
+	defer geoDB.Close()
+
 	srv := &api.Server{
 		DB: db, Log: log, Sites: siteStore, Settings: st, Writer: writer, Stats: stats.New(db),
 		Favicons: fetcher, Admin: admin, Web: web.Handler(), TrustProxy: true, MCPToken: cfg.MCPToken,
-		Tokens: tokens.New(db), RetentionDays: cfg.RetentionDays, RetentionFromEnv: cfg.RetentionDaysSet,
-		StartedAt: time.Now(), DatabasePath: cfg.DatabasePath, Google: google, Polar: polarSvc,
+		TrustedProxyHops: cfg.TrustedProxyHops, AllowLocalEvents: cfg.AllowLocalEvents,
+		CollectLimiter: ratelimit.New(cfg.CollectPerSecond, cfg.CollectBurst),
+		LoginLimiter:   ratelimit.New(loginPerSecond, loginBurst),
+		Geo:            geoDB,
+		Tokens:         tokens.New(db), RetentionDays: cfg.RetentionDays, RetentionFromEnv: cfg.RetentionDaysSet,
+		StartedAt: time.Now(), DatabasePath: cfg.DatabasePath, Google: google,
+		Revenue: revStore, Polar: polarSvc, Stripe: stripeSvc,
 	}
 
 	go maintenance(ctx, log, db, siteStore, st, fetcher, cfg)
 	go searchConsoleSync(ctx, google)
-	go polarSync(ctx, polarSvc)
+	go paymentSync(ctx, polarSvc, stripeSvc)
 
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
@@ -178,18 +196,32 @@ func maintenance(ctx context.Context, log *slog.Logger, db *sqlDB, siteStore *si
 
 type sqlDB = database.DB
 
-// polarSync reconciles orders for every connected site once a day, so
-// refunds and missed webhooks are picked up.
-func polarSync(ctx context.Context, svc *polar.Service) {
+// loginPerSecond and loginBurst throttle the login form. A person mistypes a
+// password a handful of times; a script tries thousands, and the 400ms delay
+// on a failure is not on its own enough to make that expensive.
+const (
+	loginPerSecond = 0.2 // one attempt every five seconds, sustained
+	loginBurst     = 10
+)
+
+// paymentSync reconciles orders for every connected site once a day, so
+// refunds and missed webhooks are picked up whichever processor they came
+// through.
+func paymentSync(ctx context.Context, polarSvc *polar.Service, stripeSvc *stripe.Service) {
+	const maxAge = 20 * time.Hour
+	sync := func() {
+		polarSvc.SyncStale(ctx, maxAge)
+		stripeSvc.SyncStale(ctx, maxAge)
+	}
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
-	svc.SyncStale(ctx, 20*time.Hour)
+	sync()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			svc.SyncStale(ctx, 20*time.Hour)
+			sync()
 		}
 	}
 }

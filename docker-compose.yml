@@ -2,7 +2,7 @@ services:
   glance:
     build:
       context: ./server
-    image: ghcr.io/chrisgreg/glance:latest
+    image: ghcr.io/ViralOne/glance:latest
     restart: unless-stopped
     ports:
       - "8082:8080"

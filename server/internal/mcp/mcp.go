@@ -17,10 +17,10 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/chrisgreg/glance/server/internal/polar"
-	"github.com/chrisgreg/glance/server/internal/searchconsole"
-	"github.com/chrisgreg/glance/server/internal/sites"
-	"github.com/chrisgreg/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/revenue"
+	"github.com/ViralOne/glance/server/internal/searchconsole"
+	"github.com/ViralOne/glance/server/internal/sites"
+	"github.com/ViralOne/glance/server/internal/stats"
 )
 
 // Stores is what the tools read from.
@@ -30,7 +30,7 @@ type Stores struct {
 	Sites         *sites.Store
 	Stats         *stats.Store
 	Search        *searchconsole.Store
-	Revenue       *polar.Store
+	Revenue       *revenue.Store
 	Now           func() time.Time
 }
 
@@ -479,19 +479,19 @@ type RevenueIn struct {
 }
 
 type RevenueOut struct {
-	Site               string                 `json:"site"`
-	Range              string                 `json:"range"`
-	Connected          bool                   `json:"connected"`
-	Currency           string                 `json:"currency" jsonschema:"ISO code; amounts are in its minor unit"`
-	Totals             polar.Totals           `json:"totals" jsonschema:"revenue is net of discounts, tax and refunds"`
-	Previous           polar.Totals           `json:"previous"`
-	DeltaPct           *float64               `json:"revenue_delta_pct"`
-	Visitors           int                    `json:"visitors" jsonschema:"daily-unique visitors over the same range, from the traffic rollups"`
-	RevenuePerVisitor  float64                `json:"revenue_per_visitor" jsonschema:"minor units per visitor; 0 when there were no visitors"`
-	AttributedOrders   int                    `json:"attributed_orders" jsonschema:"paid orders whose checkout carried first-touch attribution"`
-	UnattributedOrders int                    `json:"unattributed_orders" jsonschema:"paid orders with no attribution: direct buyers, or orders placed before the site passed attribution to checkout"`
-	Series             []polar.Point          `json:"series"`
-	Breakdowns         map[string][]polar.Row `json:"breakdowns" jsonschema:"keys ref, source, campaign, landing, country, product; the empty key is unattributed (see unattributed_orders)"`
+	Site               string                   `json:"site"`
+	Range              string                   `json:"range"`
+	Connected          bool                     `json:"connected"`
+	Currency           string                   `json:"currency" jsonschema:"ISO code; amounts are in its minor unit"`
+	Totals             revenue.Totals           `json:"totals" jsonschema:"revenue is net of discounts, tax and refunds"`
+	Previous           revenue.Totals           `json:"previous"`
+	DeltaPct           *float64                 `json:"revenue_delta_pct"`
+	Visitors           int                      `json:"visitors" jsonschema:"daily-unique visitors over the same range, from the traffic rollups"`
+	RevenuePerVisitor  float64                  `json:"revenue_per_visitor" jsonschema:"minor units per visitor; 0 when there were no visitors"`
+	AttributedOrders   int                      `json:"attributed_orders" jsonschema:"paid orders whose checkout carried first-touch attribution"`
+	UnattributedOrders int                      `json:"unattributed_orders" jsonschema:"paid orders with no attribution: direct buyers, or orders placed before the site passed attribution to checkout"`
+	Series             []revenue.Point          `json:"series"`
+	Breakdowns         map[string][]revenue.Row `json:"breakdowns" jsonschema:"keys ref, source, campaign, landing, country, product; the empty key is unattributed (see unattributed_orders)"`
 }
 
 func (t *tools) revenue(ctx context.Context, _ *sdk.CallToolRequest, in RevenueIn) (*sdk.CallToolResult, RevenueOut, error) {
@@ -513,15 +513,18 @@ func (t *tools) revenue(ctx context.Context, _ *sdk.CallToolRequest, in RevenueI
 	if limit > 100 {
 		limit = 100
 	}
-	out := RevenueOut{Site: s.Name, Range: rng, Series: []polar.Point{}, Breakdowns: map[string][]polar.Row{}}
+	out := RevenueOut{Site: s.Name, Range: rng, Series: []revenue.Point{}, Breakdowns: map[string][]revenue.Row{}}
 	if t.st.Revenue == nil {
 		return nil, out, nil
 	}
-	if _, err := t.st.Revenue.Get(ctx, s.ID); err != nil {
-		if errors.Is(err, polar.ErrNotConnected) {
-			return nil, out, nil
-		}
+	// A site may have several processors connected; any one of them means
+	// there is revenue worth reporting.
+	conns, err := t.st.Revenue.ForSite(ctx, s.ID)
+	if err != nil {
 		return nil, out, err
+	}
+	if len(conns) == 0 {
+		return nil, out, nil
 	}
 	out.Connected = true
 	from, to, bucket := stats.Window(rng, t.st.Now())
@@ -538,7 +541,7 @@ func (t *tools) revenue(ctx context.Context, _ *sdk.CallToolRequest, in RevenueI
 		return nil, out, err
 	}
 	out.DeltaPct = pct(out.Totals.Revenue, out.Previous.Revenue)
-	for _, dim := range polar.Dims {
+	for _, dim := range revenue.Dims {
 		if out.Breakdowns[dim], err = t.st.Revenue.Breakdown(ctx, s.ID, dim, from, to, limit); err != nil {
 			return nil, out, err
 		}

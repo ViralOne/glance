@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/stats"
 )
 
 const googleCallbackPath = "/api/v1/google/callback"

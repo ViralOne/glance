@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/rollup"
-	"github.com/chrisgreg/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/stats"
 )
 
 func TestFilteredStats(t *testing.T) {
 	s := newServer(t, "", "")
 	fixed := time.Date(2026, 9, 3, 12, 30, 0, 0, time.UTC)
 	s.Now = func() time.Time { return fixed }
-	s.TrustProxy = true
+	s.TrustedProxyHops = 1
 	h := s.Handler()
 
 	rr := do(t, h, "POST", "/api/v1/sites", map[string]any{"domain": "example.com"}, nil)

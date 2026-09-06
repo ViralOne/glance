@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // SessionCookie is the name of the admin session cookie.

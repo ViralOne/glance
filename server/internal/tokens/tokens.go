@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/auth"
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/auth"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // ErrNotFound is returned when a token does not exist.

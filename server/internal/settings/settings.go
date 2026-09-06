@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // Store reads and writes settings.

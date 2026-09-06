@@ -68,10 +68,10 @@ func TestCountryAndReferrer(t *testing.T) {
 	if Region("America/New_York") != "New York" || Region("Europe/London") != "London" || Region("UTC") != "" || Region("Etc/GMT+1") != "" {
 		t.Fatal("region")
 	}
-	if src, camp := UTM("https://example.com/?utm_source=Newsletter&utm_campaign=launch"); src != "newsletter" || camp != "launch" {
-		t.Fatalf("utm: %q %q", src, camp)
+	if src, camp, med := UTM("https://example.com/?utm_source=Newsletter&utm_campaign=launch&utm_medium=Email"); src != "newsletter" || camp != "launch" || med != "email" {
+		t.Fatalf("utm: %q %q %q", src, camp, med)
 	}
-	if src, _ := UTM("https://example.com/?ref=producthunt"); src != "producthunt" {
+	if src, _, _ := UTM("https://example.com/?ref=producthunt"); src != "producthunt" {
 		t.Fatalf("ref fallback: %q", src)
 	}
 	if p, _ := Path("https://example.com/"); p != "/" {

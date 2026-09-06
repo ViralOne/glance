@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please do not open a public issue for security problems. Use
-[GitHub's private vulnerability reporting](https://github.com/chrisgreg/glance/security/advisories/new)
+[GitHub's private vulnerability reporting](https://github.com/ViralOne/glance/security/advisories/new)
 on this repository. You will get an acknowledgement within a few days and a
 fix or mitigation as soon as one is ready.
 

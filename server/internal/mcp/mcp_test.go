@@ -3,7 +3,7 @@ package mcp
 import (
 	"testing"
 
-	"github.com/chrisgreg/glance/server/internal/stats"
+	"github.com/ViralOne/glance/server/internal/stats"
 )
 
 func TestAnalyse(t *testing.T) {

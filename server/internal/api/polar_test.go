@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/polar"
+	"github.com/ViralOne/glance/server/internal/polar"
 )
 
 const polarProduct = "prod-fplxi"
@@ -94,7 +94,7 @@ func TestPolarRevenue(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &site)
 	base := "/api/v1/sites/" + site.ID
 
-	if rr := admin("GET", base+"/polar", nil); rr.Code != 200 || !strings.Contains(rr.Body.String(), `"connected":false`) || !strings.Contains(rr.Body.String(), "/api/v1/polar/webhook/"+site.ID) {
+	if rr := admin("GET", base+"/payments", nil); rr.Code != 200 || !strings.Contains(rr.Body.String(), `"connected":false`) || !strings.Contains(rr.Body.String(), "/api/v1/payments/polar/webhook/"+site.ID) {
 		t.Fatalf("status: %d %s", rr.Code, rr.Body)
 	}
 	if rr := admin("GET", base+"/revenue", nil); rr.Code != 404 {
@@ -102,16 +102,16 @@ func TestPolarRevenue(t *testing.T) {
 	}
 
 	// A bad token is refused at connect time.
-	rr = admin("PUT", base+"/polar", map[string]any{"access_token": "nope", "server": p.URL, "product_ids": polarProduct})
+	rr = admin("PUT", base+"/payments/polar", map[string]any{"access_token": "nope", "server": p.URL, "product_ids": polarProduct})
 	if rr.Code != 422 || !strings.Contains(rr.Body.String(), "polar returned 401") {
 		t.Fatalf("bad token: %d %s", rr.Code, rr.Body)
 	}
-	rr = admin("PUT", base+"/polar", map[string]any{"access_token": "polar_oat_good", "server": "http://insecure", "product_ids": polarProduct})
+	rr = admin("PUT", base+"/payments/polar", map[string]any{"access_token": "polar_oat_good", "server": "http://insecure", "product_ids": polarProduct})
 	if rr.Code != 422 {
 		t.Fatalf("http server must be refused: %d %s", rr.Code, rr.Body)
 	}
 
-	rr = admin("PUT", base+"/polar", map[string]any{"access_token": "polar_oat_good", "server": p.URL, "product_ids": " " + polarProduct + " ,", "webhook_secret": "whsec_topsecret"})
+	rr = admin("PUT", base+"/payments/polar", map[string]any{"access_token": "polar_oat_good", "server": p.URL, "product_ids": " " + polarProduct + " ,", "webhook_secret": "whsec_topsecret"})
 	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"connected":true`) || !strings.Contains(rr.Body.String(), `"has_webhook_secret":true`) {
 		t.Fatalf("connect: %d %s", rr.Code, rr.Body)
 	}
@@ -119,7 +119,7 @@ func TestPolarRevenue(t *testing.T) {
 		t.Fatalf("secrets leaked: %s", rr.Body)
 	}
 	// Sync in the request so the assertions do not race the detached pull.
-	if rr := admin("POST", base+"/polar/sync", nil); rr.Code != 200 || !strings.Contains(rr.Body.String(), `"orders":104`) {
+	if rr := admin("POST", base+"/payments/polar/sync", nil); rr.Code != 200 || !strings.Contains(rr.Body.String(), `"orders":104`) {
 		t.Fatalf("sync: %d %s", rr.Code, rr.Body)
 	}
 
@@ -163,7 +163,7 @@ func TestPolarRevenue(t *testing.T) {
 
 	// Webhook: unsigned is refused; signed upserts, including a refund that reduces revenue.
 	body, _ := json.Marshal(map[string]any{"type": "order.refunded", "data": polarOrder("o-1", "2026-09-01T10:00:00Z", 1999, map[string]any{"status": "partially_refunded", "refunded_amount": 999})})
-	wh := "/api/v1/polar/webhook/" + site.ID
+	wh := "/api/v1/payments/polar/webhook/" + site.ID
 	if rr := do(t, h, "POST", wh, string(body), nil); rr.Code != 401 {
 		t.Fatalf("unsigned webhook: %d %s", rr.Code, rr.Body)
 	}
@@ -188,7 +188,7 @@ func TestPolarRevenue(t *testing.T) {
 		t.Fatalf("after refund webhook: %+v", rev.Totals)
 	}
 
-	if rr := admin("DELETE", base+"/polar", nil); rr.Code != 204 {
+	if rr := admin("DELETE", base+"/payments/polar", nil); rr.Code != 204 {
 		t.Fatalf("disconnect: %d", rr.Code)
 	}
 	if rr := do(t, h, "POST", wh, string(body), hdr); rr.Code != 404 {

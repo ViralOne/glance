@@ -11,8 +11,8 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/chrisgreg/glance/server/internal/polar"
-	"github.com/chrisgreg/glance/server/internal/rollup"
+	"github.com/ViralOne/glance/server/internal/polar"
+	"github.com/ViralOne/glance/server/internal/rollup"
 )
 
 type authed struct {
@@ -28,7 +28,7 @@ func (a authed) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestMCPEndToEnd(t *testing.T) {
 	s := newServer(t, "chris", "correct-horse")
 	s.MCPToken = "sixteen-char-token-ok"
-	s.TrustProxy = true
+	s.TrustedProxyHops = 1
 	fixed := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	s.Now = func() time.Time { return fixed }
 	h := s.Handler()
@@ -133,7 +133,7 @@ func TestMCPEndToEnd(t *testing.T) {
 		t.Fatalf("revenue before connect: %s", out)
 	}
 	ctx := context.Background()
-	if err := s.Polar.Store.Save(ctx, polar.Connection{SiteID: site.ID, AccessToken: "t"}); err != nil {
+	if err := s.Polar.Store.Save(ctx, polar.Connection{SiteID: site.ID, Provider: polar.Provider, AccessToken: "t"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Polar.Store.UpsertOrders(ctx, site.ID, []polar.Order{

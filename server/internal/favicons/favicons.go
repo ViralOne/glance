@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 const (
@@ -142,7 +142,7 @@ func (f *Fetcher) get(ctx context.Context, rawURL string, limit int64) ([]byte, 
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("User-Agent", "Glance/1.0 (+https://github.com/chrisgreg/glance; favicon fetcher)")
+	req.Header.Set("User-Agent", "Glance/1.0 (+https://github.com/ViralOne/glance; favicon fetcher)")
 	req.Header.Set("Accept", "image/*,text/html;q=0.8,*/*;q=0.5")
 	resp, err := f.client.Do(req)
 	if err != nil {

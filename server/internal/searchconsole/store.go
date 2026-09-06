@@ -9,7 +9,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/chrisgreg/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/ids"
 )
 
 // ErrNotConnected is returned when a site has no Google connection.

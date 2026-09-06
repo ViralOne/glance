@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  # Needed by the publish job to push to GHCR.
+  packages: write
 
 jobs:
   go:
@@ -47,8 +49,11 @@ jobs:
         working-directory: server/web
         run: npm run build
 
+  # On a pull request the image is only built, to prove the Dockerfile still
+  # works without publishing anything from unreviewed code.
   docker:
     name: Docker build
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,5 +62,45 @@ jobs:
         with:
           context: server
           push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # On main the image is built and pushed, so the latest commit is always
+  # deployable without waiting for a tagged release. Tags here are moving
+  # pointers (main, sha, edge); Release owns the immutable semver tags.
+  publish:
+    name: Publish image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Only publish something that passed, so `edge` is never a broken build.
+    needs: [go, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # No `latest` here: that belongs to the newest release, not to the
+          # newest commit, and a compose file pinned to latest should not move
+          # on every merge.
+          tags: |
+            type=edge,branch=main
+            type=raw,value=main
+            type=sha,format=long
+      - uses: docker/build-push-action@v6
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=main-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

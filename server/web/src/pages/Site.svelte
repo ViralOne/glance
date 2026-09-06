@@ -1,6 +1,6 @@
 <script lang="ts">
   // Per-site dashboard: metrics, chart, breakdowns, world map, settings.
-  import { api, DEFAULT_RANGE, googleConnectURL, isRange, polarApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type GoogleStatus, type Live, type PolarStatus, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, type Site, type Summary } from '../lib/api'
+  import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type GoogleStatus, type Live, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, type Site, type Summary } from '../lib/api'
   import { setAccentOverride } from '../lib/accent'
   import { countryName, flag, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
   import { pageIn, panel } from '../lib/motion'
@@ -60,8 +60,10 @@
   const filterLabel = (dim: Dim, key: string) =>
     dim === 'country' ? countryName(key) || 'Unknown' : dim === 'ref' ? key || 'Direct' : key || 'Unknown'
   const FILTER_DIM: Record<Dim, string> = {
-    page: 'Page', ref: 'Referrer', utm_source: 'Source', utm_campaign: 'Campaign', country: 'Country', region: 'Region',
-    browser: 'Browser', device: 'Device', os: 'OS', event: 'Event',
+    page: 'Page', ref: 'Referrer', utm_source: 'Source', utm_campaign: 'Campaign', utm_medium: 'Medium',
+    country: 'Country', region: 'Region', city: 'City',
+    browser: 'Browser', device: 'Device', os: 'OS', event: 'Event', prop: 'Property',
+    bot: 'Crawler', aibot: 'AI crawler',
   }
   const selectedKey = (dim: Dim) => (filters[dim] === undefined ? undefined : filters[dim] === '' ? (dim === 'ref' ? 'direct' : dim === 'country' ? 'XX' : '∅') : filters[dim])
   let settingsOpen = $state(false)
@@ -112,6 +114,19 @@
       googleBusy = false
     }
   }
+  // Connecting is a POST that answers with Google's authorize URL, so the
+  // browser is sent there from here rather than by following a link. A link
+  // would be a cross-site-triggerable GET that links an account to a site.
+  async function connectGoogle() {
+    googleBusy = true
+    try {
+      const { url } = await api.googleConnect(id)
+      window.location.href = url
+    } catch (e: any) {
+      error = e.message
+      googleBusy = false
+    }
+  }
   function disconnectGoogle() {
     if (!confirm('Disconnect Google Search Console? Stored search terms for this site are deleted.')) return
     googleAction(() => api.googleDisconnect(id))
@@ -139,28 +154,55 @@
   const TOP_TERMS = 10
   // Polar: revenue next to traffic, attributed to first touch when the
   // site passes it into checkout metadata.
-  let polar = $state<PolarStatus | null>(null)
+  // Payments cover several processors, so the panel is generic: one block per
+  // provider, driven by the provider's own status and form state.
+  let payments = $state<PaymentsView | null>(null)
+  const PROVIDERS: { id: PaymentProvider; label: string; tokenHint: string; tokenPlaceholder: string; help: string }[] = [
+    {
+      id: 'polar',
+      label: 'Polar',
+      tokenHint: 'organization access token (Settings, Developers) with the orders:read scope',
+      tokenPlaceholder: 'polar_oat_…',
+      help: 'https://api.polar.sh',
+    },
+    {
+      id: 'stripe',
+      label: 'Stripe',
+      tokenHint: 'secret or restricted key with read access to charges',
+      tokenPlaceholder: 'rk_live_… or sk_live_…',
+      help: 'https://api.stripe.com',
+    },
+  ]
+  const providerOf = (id: PaymentProvider) => payments?.providers.find((p) => p.provider === id)
+  const anyConnected = $derived((payments?.providers ?? []).some((p) => p.connected))
+  let openProvider = $state<PaymentProvider | null>(null)
+  let forms = $state<Record<PaymentProvider, { access_token: string; server: string; product_ids: string; webhook_secret: string }>>({
+    polar: { access_token: '', server: '', product_ids: '', webhook_secret: '' },
+    stripe: { access_token: '', server: '', product_ids: '', webhook_secret: '' },
+  })
   let revenue = $state<Revenue | null>(null)
   let polarBusy = $state(false)
-  let polarForm = $state({ access_token: '', server: '', product_ids: '', webhook_secret: '' })
-  let polarOpen = $state(false)
   let revenueTab = $state<RevenueDim>('ref')
 
   async function loadPolar() {
     try {
-      polar = await polarApi.status(id)
-      if (polar.connection) polarForm = { access_token: '', server: polar.connection.server, product_ids: polar.connection.product_ids, webhook_secret: '' }
+      payments = await paymentsApi.status(id)
+      for (const p of payments.providers) {
+        if (p.connection) {
+          forms[p.provider] = { access_token: '', server: p.connection.server, product_ids: p.connection.product_ids, webhook_secret: '' }
+        }
+      }
     } catch {
-      polar = null
+      payments = null
     }
   }
   async function loadRevenue() {
-    if (!polar?.connected || !range) {
+    if (!anyConnected || !range) {
       revenue = null
       return
     }
     try {
-      revenue = await polarApi.revenue(id, range)
+      revenue = await paymentsApi.revenue(id, range)
     } catch {
       revenue = null
     }
@@ -170,7 +212,7 @@
     try {
       await run()
       error = ''
-      polarOpen = false
+      openProvider = null
       await loadPolar()
       await loadRevenue()
     } catch (e: any) {
@@ -179,27 +221,31 @@
       polarBusy = false
     }
   }
-  function savePolar() {
-    const input: Parameters<typeof polarApi.connect>[1] = { server: polarForm.server, product_ids: polarForm.product_ids }
-    if (polarForm.access_token.trim()) input.access_token = polarForm.access_token.trim()
-    if (polarForm.webhook_secret.trim()) input.webhook_secret = polarForm.webhook_secret.trim()
-    polarAction(() => polarApi.connect(id, input))
+  function saveProvider(provider: PaymentProvider) {
+    const form = forms[provider]
+    const input: Parameters<typeof paymentsApi.connect>[2] = { server: form.server, product_ids: form.product_ids }
+    // A blank secret means "keep what is stored", so it is not sent at all.
+    if (form.access_token.trim()) input.access_token = form.access_token.trim()
+    if (form.webhook_secret.trim()) input.webhook_secret = form.webhook_secret.trim()
+    polarAction(() => paymentsApi.connect(id, provider, input))
   }
-  function disconnectPolar() {
-    if (!confirm('Disconnect Polar? Stored orders for this site are deleted.')) return
-    polarAction(() => polarApi.disconnect(id))
+  function disconnectProvider(provider: PaymentProvider) {
+    const label = PROVIDERS.find((p) => p.id === provider)?.label ?? provider
+    if (!confirm(`Disconnect ${label}? Its stored orders for this site are deleted.`)) return
+    polarAction(() => paymentsApi.disconnect(id, provider))
   }
   $effect(() => {
     loadPolar()
   })
   $effect(() => {
     range
-    polar?.connected
+    anyConnected
     loadRevenue()
   })
   const REVENUE_DIMS: { value: RevenueDim; label: string }[] = [
     { value: 'ref', label: 'Referrer' }, { value: 'source', label: 'Source' }, { value: 'campaign', label: 'Campaign' },
     { value: 'landing', label: 'Landing' }, { value: 'country', label: 'Country' }, { value: 'product', label: 'Product' },
+    { value: 'provider', label: 'Processor' },
   ]
   const revenueRows = $derived(
     (revenue?.breakdowns[revenueTab] ?? []).map((r) => ({
@@ -286,8 +332,10 @@
     }
   }
   const DIM_TITLE: Record<Dim, string> = {
-    page: 'Pages', ref: 'Referrers', utm_source: 'Sources', utm_campaign: 'Campaigns', country: 'Countries', region: 'Regions',
-    browser: 'Browsers', device: 'Devices', os: 'Operating systems', event: 'Events',
+    page: 'Pages', ref: 'Referrers', utm_source: 'Sources', utm_campaign: 'Campaigns', utm_medium: 'Mediums',
+    country: 'Countries', region: 'Regions', city: 'Cities',
+    browser: 'Browsers', device: 'Devices', os: 'Operating systems', event: 'Events', prop: 'Properties',
+    bot: 'Crawlers', aibot: 'AI crawlers',
   }
   // Card tabs, as in the reference: one card per group, a dimension per tab.
   let sourceTab = $state<'ref' | 'utm_source' | 'utm_campaign'>('ref')
@@ -395,52 +443,74 @@
         <div class="text"><div class="label">Favicon</div><div class="hint">Fetched from your site by Glance, never from a third party</div></div>
         <Button variant="secondary" size="sm" onclick={() => api.refreshFavicon(id).then((s) => (site = { ...site!, ...s }))}>Refresh</Button>
       </div>
-      {#if polar}
-        <div class="setting google">
-          <div class="text">
-            <div class="label">Polar</div>
-            {#if polar.connected && polar.connection}
-              <div class="hint">
-                {polar.connection.server.replace('https://', '')}{#if polar.connection.product_ids} · {polar.connection.product_ids.split(',').length} {polar.connection.product_ids.includes(',') ? 'products' : 'product'}{/if}
-                · {fmtNum(polar.orders)} orders
-                {#if polar.connection.sync_error}
-                  · <span class="bad">{polar.connection.sync_error}</span>
-                {:else if polar.connection.synced_at}
-                  · synced {new Date(polar.connection.synced_at).toLocaleString()}
-                {:else}
-                  · first pull pending
-                {/if}
-                {#if !polar.connection.has_webhook_secret}
-                  · <span class="warn">no webhook, sales appear daily</span>
-                {/if}
-              </div>
-            {:else}
-              <div class="hint">Show revenue next to traffic. Needs an organization access token from Polar (Settings, Developers) with the orders:read scope.</div>
-            {/if}
-            {#if polarOpen}
-              <div class="polar-form" transition:panel>
-                <Input bind:value={polarForm.access_token} placeholder={polar.connected ? 'Access token (leave blank to keep)' : 'polar_oat_…'} aria-label="Polar access token" type="password" mono />
-                <Input bind:value={polarForm.product_ids} placeholder="Product ids, comma separated (blank = all)" aria-label="Polar product ids" mono />
-                <Input bind:value={polarForm.webhook_secret} placeholder={polar.connection?.has_webhook_secret ? 'Webhook secret (leave blank to keep)' : 'Webhook secret (optional)'} aria-label="Polar webhook secret" type="password" mono />
-                <Input bind:value={polarForm.server} placeholder="https://api.polar.sh" aria-label="Polar API server" mono />
-                <div class="hint">Webhook URL for Polar, subscribe to the order events: <code>{polar.webhook_url}</code></div>
-                <div class="google-actions">
-                  <Button size="sm" disabled={polarBusy} onclick={savePolar}>{polarBusy ? 'Checking' : polar.connected ? 'Save' : 'Connect'}</Button>
-                  <Button variant="secondary" size="sm" onclick={() => (polarOpen = false)}>Cancel</Button>
+      {#if payments}
+        {#each PROVIDERS as provider (provider.id)}
+          {@const st = providerOf(provider.id)}
+          <div class="setting google">
+            <div class="text">
+              <div class="label">{provider.label}</div>
+              {#if st?.connected && st.connection}
+                <div class="hint">
+                  {st.connection.server.replace('https://', '')}{#if st.connection.product_ids}
+                    · {st.connection.product_ids.split(',').length} {st.connection.product_ids.includes(',') ? 'products' : 'product'}{/if}
+                  · {fmtNum(payments.orders)} orders across processors
+                  {#if st.connection.sync_error}
+                    · <span class="bad">{st.connection.sync_error}</span>
+                  {:else if st.connection.synced_at}
+                    · synced {new Date(st.connection.synced_at).toLocaleString()}
+                  {:else}
+                    · first pull pending
+                  {/if}
+                  {#if !st.connection.has_webhook_secret}
+                    · <span class="warn">no webhook, sales appear daily</span>
+                  {/if}
                 </div>
-              </div>
-            {/if}
+              {:else}
+                <div class="hint">Show revenue next to traffic. Needs a {provider.tokenHint}.</div>
+              {/if}
+              {#if openProvider === provider.id}
+                <div class="polar-form" transition:panel>
+                  <Input
+                    bind:value={forms[provider.id].access_token}
+                    placeholder={st?.connected ? 'Key (leave blank to keep)' : provider.tokenPlaceholder}
+                    aria-label="{provider.label} key"
+                    type="password"
+                    mono
+                  />
+                  <Input bind:value={forms[provider.id].product_ids} placeholder="Product ids, comma separated (blank = all)" aria-label="{provider.label} product ids" mono />
+                  <Input
+                    bind:value={forms[provider.id].webhook_secret}
+                    placeholder={st?.connection?.has_webhook_secret ? 'Webhook secret (leave blank to keep)' : 'Webhook secret (optional)'}
+                    aria-label="{provider.label} webhook secret"
+                    type="password"
+                    mono
+                  />
+                  <Input bind:value={forms[provider.id].server} placeholder={provider.help} aria-label="{provider.label} API server" mono />
+                  <div class="hint">
+                    Webhook URL for {provider.label}, subscribed to
+                    {provider.id === 'polar' ? 'the order events' : 'charge.succeeded, charge.refunded and charge.updated'}:
+                    <code>{st?.webhook_url}</code>
+                  </div>
+                  <div class="google-actions">
+                    <Button size="sm" disabled={polarBusy} onclick={() => saveProvider(provider.id)}>{polarBusy ? 'Checking' : st?.connected ? 'Save' : 'Connect'}</Button>
+                    <Button variant="secondary" size="sm" onclick={() => (openProvider = null)}>Cancel</Button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+            <div class="google-actions">
+              {#if st?.connected}
+                <Button variant="secondary" size="sm" disabled={polarBusy} onclick={() => polarAction(() => paymentsApi.sync(id, provider.id))}>
+                  {polarBusy ? 'Working' : 'Sync now'}
+                </Button>
+                <Button variant="secondary" size="sm" onclick={() => (openProvider = openProvider === provider.id ? null : provider.id)}>Edit</Button>
+                <Button variant="secondary" size="sm" disabled={polarBusy} onclick={() => disconnectProvider(provider.id)}>Disconnect</Button>
+              {:else}
+                <Button variant="secondary" size="sm" onclick={() => (openProvider = openProvider === provider.id ? null : provider.id)}>Connect {provider.label}</Button>
+              {/if}
+            </div>
           </div>
-          <div class="google-actions">
-            {#if polar.connected}
-              <Button variant="secondary" size="sm" disabled={polarBusy} onclick={() => polarAction(() => polarApi.sync(id))}>{polarBusy ? 'Working' : 'Sync now'}</Button>
-              <Button variant="secondary" size="sm" onclick={() => (polarOpen = !polarOpen)}>Edit</Button>
-              <Button variant="secondary" size="sm" disabled={polarBusy} onclick={disconnectPolar}>Disconnect</Button>
-            {:else}
-              <Button variant="secondary" size="sm" onclick={() => (polarOpen = !polarOpen)}>Connect Polar</Button>
-            {/if}
-          </div>
-        </div>
+        {/each}
       {/if}
       {#if google}
         <div class="setting google">
@@ -481,7 +551,7 @@
               <Button variant="secondary" size="sm" disabled={googleBusy || !google.connection?.property} onclick={() => googleAction(() => api.googleSync(id))}>{googleBusy ? 'Working' : 'Sync now'}</Button>
               <Button variant="secondary" size="sm" disabled={googleBusy} onclick={disconnectGoogle}>Disconnect</Button>
             {:else if google.configured}
-              <a class="btn" href={googleConnectURL(id)}>{google.needs_reconnect ? 'Reconnect Google' : 'Connect Google Search Console'}</a>
+              <Button variant="secondary" size="sm" onclick={connectGoogle}>{google.needs_reconnect ? 'Reconnect Google' : 'Connect Google Search Console'}</Button>
             {/if}
           </div>
         </div>
@@ -656,8 +726,6 @@
   .warn { color: var(--up-text-muted); }
   .polar-form { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 460px; padding-top: 4px; }
   .google-actions { display: flex; gap: 8px; flex-shrink: 0; }
-  .btn { font: var(--up-type-ui); color: var(--up-ink); background: var(--up-bg); box-shadow: inset 0 0 0 1px var(--up-border-control); border-radius: var(--up-radius-control); height: 30px; padding: 0 12px; display: inline-flex; align-items: center; white-space: nowrap; }
-  .btn:hover { background: var(--up-bg-hover); color: var(--up-ink); }
   .props { display: flex; flex-wrap: wrap; gap: 6px; }
   .prop { font: var(--up-type-code); color: var(--up-ink); background: var(--up-bg-hover); border: none; border-radius: var(--up-radius-control); padding: 4px 8px; cursor: pointer; }
   .prop:hover { box-shadow: inset 0 0 0 1px var(--up-border-control); }

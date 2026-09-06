@@ -15,6 +15,8 @@ export interface Row {
   key: string
   pageviews: number
   visitors: number
+  /** Summed event value in minor units; only set for events and properties. */
+  value?: number
 }
 
 export interface Totals {
@@ -22,7 +24,22 @@ export interface Totals {
   visitors: number
 }
 
-export type Dim = 'page' | 'ref' | 'country' | 'region' | 'device' | 'browser' | 'os' | 'event' | 'utm_source' | 'utm_campaign'
+export type Dim =
+  | 'page'
+  | 'ref'
+  | 'country'
+  | 'region'
+  | 'city'
+  | 'device'
+  | 'browser'
+  | 'os'
+  | 'event'
+  | 'prop'
+  | 'utm_source'
+  | 'utm_campaign'
+  | 'utm_medium'
+  | 'bot'
+  | 'aibot'
 
 export interface Marker {
   t: string
@@ -54,6 +71,9 @@ export interface Summary {
   truncated?: boolean
   previous_unavailable?: boolean
   retention_days?: number
+  /** The window contains imported days, which have no hourly detail, so the
+   *  chart was bucketed by day even on a range that normally charts hourly. */
+  hourly_unavailable?: boolean
 }
 
 export interface Live {
@@ -82,6 +102,12 @@ export interface Site {
   default_range: string
   has_favicon: boolean
   position: number
+  /** Extra registrable domains this site accepts events from. */
+  domains: string[]
+  /** Glob patterns whose pageviews are ignored, e.g. "/admin/*". */
+  exclude_paths: string[]
+  /** Addresses or CIDR blocks to ignore, so your own visits do not count. */
+  exclude_ips: string[]
   created_at: string
   updated_at: string
   card: SiteCard
@@ -118,6 +144,8 @@ export interface Token {
   id: string
   name: string
   prefix: string
+  /** 'read' can only read; 'write' may additionally record annotations. */
+  scope: 'read' | 'write'
   created_at: string
   last_used_at?: string
 }
@@ -147,23 +175,6 @@ export interface SearchTerm {
   position: number
 }
 
-export interface PolarConnection {
-  site_id: string
-  server: string
-  product_ids: string
-  has_webhook_secret: boolean
-  connected_at: string
-  synced_at: string
-  sync_error: string
-}
-
-export interface PolarStatus {
-  connected: boolean
-  connection?: PolarConnection
-  webhook_url: string
-  orders: number
-}
-
 export interface RevenuePoint {
   t: string
   revenue: number // minor units
@@ -181,7 +192,7 @@ export interface RevenueRow {
   orders: number
 }
 
-export type RevenueDim = 'ref' | 'source' | 'campaign' | 'landing' | 'country' | 'product'
+export type RevenueDim = 'ref' | 'source' | 'campaign' | 'landing' | 'country' | 'product' | 'provider'
 
 export interface Revenue {
   range: Range
@@ -190,6 +201,170 @@ export interface Revenue {
   previous: RevenueTotals
   series: RevenuePoint[]
   breakdowns: Record<RevenueDim, RevenueRow[]>
+}
+
+export interface Goal {
+  id: string
+  site_id: string
+  name: string
+  kind: 'event' | 'path'
+  target: string
+  value: number
+  position: number
+  created_at: string
+}
+
+export interface GoalResult extends Goal {
+  /** Summed daily converting visitors, matching how visitors are counted. */
+  conversions: number
+  /** Every firing, so one visitor converting twice contributes two. */
+  completions: number
+  /** Conversions over the window's visitors, as a percentage. */
+  rate: number
+  /** Summed worth in minor units. */
+  value: number
+}
+
+export interface FunnelStep {
+  name: string
+  kind: 'event' | 'path'
+  target: string
+}
+
+export interface FunnelStepResult extends FunnelStep {
+  visitors: number
+  rate: number
+  drop_off: number
+  drop_off_rate: number
+}
+
+export interface Funnel {
+  id: string
+  site_id: string
+  name: string
+  steps: FunnelStep[]
+  position: number
+  created_at: string
+}
+
+export interface FunnelResult extends Omit<Funnel, 'steps'> {
+  steps: FunnelStepResult[]
+  conversion: number
+  /** The window was cut to the retention period: funnels read raw events. */
+  truncated?: boolean
+  retention_days?: number
+  from: string
+  to: string
+}
+
+export interface Note {
+  id: string
+  site_id: string
+  day: string
+  text: string
+  created_at: string
+}
+
+export type VitalMetric = 'LCP' | 'INP' | 'CLS' | 'TTFB' | 'FCP'
+
+export interface VitalRow {
+  metric: VitalMetric
+  unit: string
+  samples: number
+  p75: number
+  p50: number
+  rating: 'good' | 'needs-improvement' | 'poor'
+  good_pct: number
+  poor_pct: number
+}
+
+export interface VitalScope {
+  key: string
+  rows: VitalRow[]
+}
+
+export interface Vitals {
+  range: Range
+  overall: VitalRow[]
+  devices: VitalScope[]
+  pages: VitalScope[]
+}
+
+export interface Share {
+  slug: string
+  site_id: string
+  has_password: boolean
+  show_revenue: boolean
+  created_at: string
+  last_seen_at: string
+  url: string
+}
+
+export type AlertKind = 'spike' | 'drop' | 'threshold' | 'digest'
+export type AlertChannel = 'webhook' | 'email'
+export type AlertMetric = 'visitors' | 'pageviews' | 'revenue'
+
+export interface Alert {
+  id: string
+  /** Empty covers every site. */
+  site_id: string
+  kind: AlertKind
+  metric: AlertMetric
+  window: string
+  threshold: number
+  channel: AlertChannel
+  destination: string
+  enabled: boolean
+  cooldown_min: number
+  last_fired: string
+  last_error: string
+  created_at: string
+}
+
+export type ImportFormat = 'plausible' | 'ga4' | 'fathom' | 'umami' | 'glance'
+export const IMPORT_FORMATS: { id: ImportFormat; label: string; hint: string }[] = [
+  { id: 'plausible', label: 'Plausible', hint: 'the CSV export, zipped or a single file' },
+  { id: 'ga4', label: 'Google Analytics 4', hint: 'a report CSV with Date as a dimension' },
+  { id: 'fathom', label: 'Fathom', hint: 'the CSV export' },
+  { id: 'umami', label: 'Umami', hint: 'the CSV export' },
+  { id: 'glance', label: 'Glance', hint: "another Glance instance's export" },
+]
+
+export interface ImportResult {
+  format: string
+  days: number
+  rows: number
+  visitors: number
+  pageviews: number
+  from: string
+  to: string
+  dimensions: string[]
+  warnings: string[]
+}
+
+export type PaymentProvider = 'polar' | 'stripe'
+
+export interface PaymentConnection {
+  site_id: string
+  provider: PaymentProvider
+  server: string
+  product_ids: string
+  has_webhook_secret: boolean
+  connected_at: string
+  synced_at: string
+  sync_error: string
+}
+
+export interface PaymentStatus {
+  provider: PaymentProvider
+  connected: boolean
+  connection?: PaymentConnection
+  webhook_url: string
+}
+
+export interface PaymentsView {
+  providers: PaymentStatus[]
+  orders: number
 }
 
 export class ApiError extends Error {
@@ -236,7 +411,7 @@ export const api = {
   sites: () => request<{ sites: Site[] }>('GET', '/api/v1/sites'),
   site: (id: string) => request<Site>('GET', `/api/v1/sites/${id}`),
   createSite: (input: { name?: string; domain: string }) => request<Site>('POST', '/api/v1/sites', input),
-  updateSite: (id: string, patch: Partial<Pick<Site, 'name' | 'domain' | 'home_country' | 'accent' | 'default_range'>>) => request<Site>('PATCH', `/api/v1/sites/${id}`, patch),
+  updateSite: (id: string, patch: Partial<Pick<Site, 'name' | 'domain' | 'home_country' | 'accent' | 'default_range' | 'domains' | 'exclude_paths' | 'exclude_ips'>>) => request<Site>('PATCH', `/api/v1/sites/${id}`, patch),
   deleteSite: (id: string) => request<void>('DELETE', `/api/v1/sites/${id}`),
   reorderSites: (ids: string[]) => request<{ sites: Site[] }>('POST', '/api/v1/sites/reorder', { ids }),
   refreshFavicon: (id: string) => request<Site>('POST', `/api/v1/sites/${id}/refresh-favicon`),
@@ -248,8 +423,8 @@ export const api = {
   theme: () => request<{ accent: string; title: string }>('GET', '/api/v1/theme'),
   settings: () => request<GeneralSettings>('GET', '/api/v1/settings'),
   updateSettings: (patch: Partial<Omit<GeneralSettings, 'retention_from_env'>>) => request<GeneralSettings>('PATCH', '/api/v1/settings', patch),
-  tokens: () => request<{ tokens: Token[]; env_token_set: boolean }>('GET', '/api/v1/tokens'),
-  createToken: (name: string) => request<{ token: Token; secret: string }>('POST', '/api/v1/tokens', { name }),
+  tokens: () => request<{ tokens: Token[]; env_token_set: boolean; scopes: string[] }>('GET', '/api/v1/tokens'),
+  createToken: (name: string, scope: 'read' | 'write' = 'read') => request<{ token: Token; secret: string }>('POST', '/api/v1/tokens', { name, scope }),
   deleteToken: (id: string) => request<void>('DELETE', `/api/v1/tokens/${id}`),
   rollup: () => request<void>('POST', '/api/v1/rollup'),
 
@@ -258,18 +433,61 @@ export const api = {
   googleDisconnect: (id: string) => request<void>('DELETE', `/api/v1/sites/${id}/google`),
   googleSync: (id: string) => request<{ status: GoogleStatus; redirect_uri: string }>('POST', `/api/v1/sites/${id}/google/sync`),
   searchTerms: (id: string, range: Range) => request<{ range: Range; rows: SearchTerm[] }>('GET', `/api/v1/sites/${id}/search-terms?range=${range}&limit=500`),
+  /** Starting the OAuth flow is a POST, so the URL comes back for the page to
+   *  navigate to rather than as a redirect. */
+  googleConnect: (id: string) => request<{ url: string }>('POST', `/api/v1/sites/${id}/google/connect`),
+
+  goals: (id: string, range: Range) => request<{ range: Range; visitors: number; goals: GoalResult[] }>('GET', `/api/v1/sites/${id}/goals?range=${range}`),
+  createGoal: (id: string, input: { name?: string; kind?: string; target: string; value?: number }) => request<Goal>('POST', `/api/v1/sites/${id}/goals`, input),
+  updateGoal: (id: string, goal: string, patch: Partial<Pick<Goal, 'name' | 'kind' | 'target' | 'value'>>) => request<Goal>('PATCH', `/api/v1/sites/${id}/goals/${goal}`, patch),
+  deleteGoal: (id: string, goal: string) => request<void>('DELETE', `/api/v1/sites/${id}/goals/${goal}`),
+
+  funnels: (id: string, range: Range) => request<{ range: Range; funnels: FunnelResult[] }>('GET', `/api/v1/sites/${id}/funnels?range=${range}`),
+  createFunnel: (id: string, input: { name?: string; steps: FunnelStep[] }) => request<Funnel>('POST', `/api/v1/sites/${id}/funnels`, input),
+  updateFunnel: (id: string, funnel: string, patch: { name?: string; steps?: FunnelStep[] }) => request<Funnel>('PATCH', `/api/v1/sites/${id}/funnels/${funnel}`, patch),
+  deleteFunnel: (id: string, funnel: string) => request<void>('DELETE', `/api/v1/sites/${id}/funnels/${funnel}`),
+
+  notes: (id: string, range: Range) => request<{ notes: Note[] }>('GET', `/api/v1/sites/${id}/notes?range=${range}`),
+  createNote: (id: string, input: { text: string; day?: string }) => request<Note>('POST', `/api/v1/sites/${id}/notes`, input),
+  updateNote: (id: string, note: string, patch: { text?: string; day?: string }) => request<Note>('PATCH', `/api/v1/sites/${id}/notes/${note}`, patch),
+  deleteNote: (id: string, note: string) => request<void>('DELETE', `/api/v1/sites/${id}/notes/${note}`),
+
+  vitals: (id: string, range: Range, limit = 10) => request<{ vitals: Vitals }>('GET', `/api/v1/sites/${id}/vitals?range=${range}&limit=${limit}`),
+
+  shares: (id: string) => request<{ shares: Share[] }>('GET', `/api/v1/sites/${id}/shares`),
+  createShare: (id: string, input: { password?: string; show_revenue?: boolean } = {}) => request<Share>('POST', `/api/v1/sites/${id}/shares`, input),
+  updateShare: (id: string, slug: string, patch: { password?: string; show_revenue?: boolean }) => request<Share>('PATCH', `/api/v1/sites/${id}/shares/${slug}`, patch),
+  deleteShare: (id: string, slug: string) => request<void>('DELETE', `/api/v1/sites/${id}/shares/${slug}`),
+
+  alerts: () => request<{ alerts: Alert[]; email_configured: boolean; windows: string[] }>('GET', '/api/v1/alerts'),
+  createAlert: (input: Partial<Alert>) => request<Alert>('POST', '/api/v1/alerts', input),
+  updateAlert: (id: string, patch: Partial<Alert>) => request<Alert>('PATCH', `/api/v1/alerts/${id}`, patch),
+  deleteAlert: (id: string) => request<void>('DELETE', `/api/v1/alerts/${id}`),
+  testAlert: (id: string) => request<{ status: string; channel: string; destination: string }>('POST', `/api/v1/alerts/${id}/test`),
+
+  /** Uploads an export file as the raw body; not JSON, so it bypasses request(). */
+  async importData(id: string, format: ImportFormat, file: File): Promise<ImportResult> {
+    const res = await fetch(`/api/v1/sites/${id}/import?format=${format}`, { method: 'POST', body: file })
+    const text = await res.text()
+    let parsed: any = null
+    try {
+      parsed = text ? JSON.parse(text) : null
+    } catch {
+      parsed = null
+    }
+    if (!res.ok) throw new ApiError(res.status, parsed?.error ?? 'error', parsed?.message ?? `Import failed (${res.status})`)
+    return parsed as ImportResult
+  },
 }
 
-export const polarApi = {
-  status: (id: string) => request<PolarStatus>('GET', `/api/v1/sites/${id}/polar`),
-  connect: (id: string, input: { access_token?: string; server?: string; product_ids?: string; webhook_secret?: string }) => request<PolarStatus>('PUT', `/api/v1/sites/${id}/polar`, input),
-  disconnect: (id: string) => request<void>('DELETE', `/api/v1/sites/${id}/polar`),
-  sync: (id: string) => request<PolarStatus>('POST', `/api/v1/sites/${id}/polar/sync`),
+export const paymentsApi = {
+  status: (id: string) => request<PaymentsView>('GET', `/api/v1/sites/${id}/payments`),
+  connect: (id: string, provider: PaymentProvider, input: { access_token?: string; server?: string; product_ids?: string; webhook_secret?: string }) =>
+    request<PaymentsView>('PUT', `/api/v1/sites/${id}/payments/${provider}`, input),
+  disconnect: (id: string, provider: PaymentProvider) => request<void>('DELETE', `/api/v1/sites/${id}/payments/${provider}`),
+  sync: (id: string, provider: PaymentProvider) => request<PaymentsView>('POST', `/api/v1/sites/${id}/payments/${provider}/sync`),
   revenue: (id: string, range: Range, limit = 10) => request<Revenue>('GET', `/api/v1/sites/${id}/revenue?range=${range}&limit=${limit}`),
 }
-
-/** Browser destination that starts the Google Search Console connect flow. */
-export const googleConnectURL = (id: string) => `/api/v1/sites/${id}/google/connect`
 
 /** URL of a site's stored icon (404 when none). */
 export const siteIconURL = (id: string) => `/api/v1/sites/${id}/favicon`

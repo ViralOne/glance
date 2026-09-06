@@ -53,13 +53,12 @@ func (s *Server) googleConnect(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "not_configured", "set GLANCE_GOOGLE_CLIENT_ID and GLANCE_GOOGLE_CLIENT_SECRET to connect Google")
 		return
 	}
-	// A GET, so adminAuth lets read-only API tokens through; connecting a
-	// site to a Google account is a write.
-	if bearer(r) != "" {
-		writeError(w, http.StatusForbidden, "read_only", "API tokens are read-only")
-		return
-	}
-	http.Redirect(w, r, s.Google.BeginConnect(st.ID, s.googleRedirectURI(r)), http.StatusFound)
+	// The authorize URL is returned rather than redirected to, because this is
+	// a POST: starting an OAuth flow links a Google account to a site, and a
+	// GET that does that can be triggered by a cross-site link (SameSite=Lax
+	// permits top-level GET navigation). The dashboard navigates to the URL
+	// itself. adminAuth already refuses API tokens on a POST.
+	writeJSON(w, http.StatusOK, map[string]string{"url": s.Google.BeginConnect(st.ID, s.googleRedirectURI(r))})
 }
 
 // googleCallback is reached by a top-level redirect from Google. It is

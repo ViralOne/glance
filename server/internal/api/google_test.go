@@ -99,12 +99,18 @@ func TestGoogleSearchConsole(t *testing.T) {
 
 	// Connect sends the browser to Google with a one-shot state.
 	rr = admin("POST", "/api/v1/sites/"+site.ID+"/google/connect", nil)
-	if rr.Code != 302 {
+	if rr.Code != 200 {
 		t.Fatalf("connect: %d %s", rr.Code, rr.Body)
 	}
-	consent, err := url.Parse(rr.Header().Get("Location"))
+	// The authorize URL comes back as JSON for the dashboard to navigate to,
+	// rather than as a redirect: see googleConnect.
+	var connectResp struct{ URL string }
+	if err := json.Unmarshal(rr.Body.Bytes(), &connectResp); err != nil {
+		t.Fatalf("connect body: %s", rr.Body)
+	}
+	consent, err := url.Parse(connectResp.URL)
 	if err != nil || !strings.HasPrefix(consent.String(), g.URL+"/auth") {
-		t.Fatalf("consent url: %s", rr.Header().Get("Location"))
+		t.Fatalf("consent url: %s", connectResp.URL)
 	}
 	q := consent.Query()
 	if q.Get("client_id") != "cid" || q.Get("access_type") != "offline" || q.Get("prompt") != "consent" || !strings.Contains(q.Get("scope"), "webmasters.readonly") {
@@ -131,7 +137,8 @@ func TestGoogleSearchConsole(t *testing.T) {
 
 	// Fresh state, good code: connected, property matched to the domain.
 	rr = admin("POST", "/api/v1/sites/"+site.ID+"/google/connect", nil)
-	consent, _ = url.Parse(rr.Header().Get("Location"))
+	_ = json.Unmarshal(rr.Body.Bytes(), &connectResp)
+	consent, _ = url.Parse(connectResp.URL)
 	rr = do(t, h, "GET", "/api/v1/google/callback?state="+consent.Query().Get("state")+"&code=good-code", nil, nil)
 	if rr.Code != 302 || rr.Header().Get("Location") != "/s/"+site.ID+"?google=connected" {
 		t.Fatalf("callback: %d %s", rr.Code, rr.Header().Get("Location"))

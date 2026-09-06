@@ -348,7 +348,12 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 
 func (s *Server) script(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// An hour of hard caching, then a day of serving the old copy while a new
+	// one is fetched in the background. A full day of max-age means a change to
+	// the snippet takes a day to reach visitors, which is a long time to wait
+	// to fix a measurement bug; stale-while-revalidate keeps the request off
+	// the critical path anyway.
+	w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
 	w.Header().Set("ETag", snippetETag)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Header.Get("If-None-Match") == snippetETag {
@@ -384,6 +389,12 @@ type collectBody struct {
 	// Vitals carries Core Web Vitals sampled by the snippet.
 	Vitals *vitalsBody `json:"cwv"`
 }
+
+// vitalsOnlyName is the reserved event name the snippet uses when it has
+// vitals to report but no pageview to attach them to, because the page is
+// being hidden. The leading $ keeps it out of the namespace a site would use
+// for its own events.
+const vitalsOnlyName = "$vitals"
 
 type vitalsBody struct {
 	LCP  *float64 `json:"lcp"`
@@ -455,6 +466,16 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	salt, err := s.Settings.Salt(r.Context(), now)
 	if err != nil {
 		s.Log.Error("collect.salt_failed", "error", err.Error())
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	// A vitals-only flush: the snippet reports measurements it could not
+	// attach to a pageview because the page was already going away. It must
+	// not be counted as a hit of any kind.
+	if strings.TrimSpace(in.Name) == vitalsOnlyName {
+		if in.Vitals != nil {
+			s.enqueueVitals(site.ID, path, ua.Device, now, in.Vitals)
+		}
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}

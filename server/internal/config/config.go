@@ -48,9 +48,20 @@ type Config struct {
 	CollectBurst     int
 	CollectPerSecond float64
 
-	// Admin login for the dashboard and admin API. Both must be set to enable it.
+	// Admin login for the dashboard and admin API.
+	//
+	// When both are set they pin the credential and it cannot be changed from
+	// the dashboard, because the environment would override the change on the
+	// next restart. When they are not, the credential lives in the database:
+	// generated on first boot and printed once to the log, then changeable from
+	// Settings.
 	AdminUser     string
 	AdminPassword string
+
+	// DisableAuth runs with no login at all. This used to be what happened
+	// when the admin variables were merely forgotten, which meant an instance
+	// could be public by accident; now it has to be asked for.
+	DisableAuth bool
 
 	// MCPToken, when set, is a bearer token that grants read-only access to
 	// the MCP endpoint (/mcp). The admin login works there too.
@@ -147,6 +158,7 @@ func Load() (Config, error) {
 		c.TrustedProxyHops = n
 	}
 	c.AllowLocalEvents = boolEnv("GLANCE_ALLOW_LOCAL_EVENTS")
+	c.DisableAuth = boolEnv("GLANCE_DISABLE_AUTH")
 	if v := os.Getenv("GLANCE_COLLECT_BURST"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -166,6 +178,9 @@ func Load() (Config, error) {
 	}
 	if c.AdminPassword != "" && len(c.AdminPassword) < 8 {
 		return c, fmt.Errorf("GLANCE_ADMIN_PASSWORD must be at least 8 characters")
+	}
+	if c.DisableAuth && c.AdminUser != "" {
+		return c, fmt.Errorf("GLANCE_DISABLE_AUTH cannot be combined with GLANCE_ADMIN_USER; pick one")
 	}
 	if c.MCPToken != "" && len(c.MCPToken) < 16 {
 		return c, fmt.Errorf("GLANCE_MCP_TOKEN must be at least 16 characters")

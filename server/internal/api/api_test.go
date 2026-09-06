@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -34,6 +35,22 @@ import (
 	"github.com/ViralOne/glance/server/internal/tokens"
 )
 
+// newTestAdmin builds an Admin the way main does: a credential from the
+// "environment" when one is given, and authentication off otherwise. Tests that
+// pass empty strings are exercising the no-login path deliberately.
+func newTestAdmin(t *testing.T, db *sql.DB, user, pass string) *auth.Admin {
+	t.Helper()
+	admin := auth.NewAdmin(auth.NewSessionStore(db))
+	if user == "" {
+		admin.Disable()
+		return admin
+	}
+	if err := admin.SetEnv(user, pass); err != nil {
+		t.Fatalf("set admin credential: %v", err)
+	}
+	return admin
+}
+
 func newServer(t *testing.T, user, pass string) *Server {
 	t.Helper()
 	db, err := database.Open(":memory:")
@@ -53,7 +70,7 @@ func newServer(t *testing.T, user, pass string) *Server {
 	}
 	return &Server{
 		DB: db, Log: log, Sites: siteStore, Settings: settings.New(db), Writer: events.NewWriter(db, log),
-		Stats: statsStore, Favicons: favicons.New(db), Admin: auth.NewAdmin(user, pass, auth.NewSessionStore(db)),
+		Stats: statsStore, Favicons: favicons.New(db), Admin: newTestAdmin(t, db, user, pass), AdminStore: auth.NewStore(db),
 		Tokens: tokens.New(db), RetentionDays: 7, TrustedProxyHops: 1,
 		Google:  searchconsole.NewService(searchconsole.NewStore(db), searchconsole.NewClient("", ""), log),
 		Revenue: revStore,

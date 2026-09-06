@@ -65,14 +65,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	admin := auth.NewAdmin(cfg.AdminUser, cfg.AdminPassword, auth.NewSessionStore(db))
+	admin := auth.NewAdmin(auth.NewSessionStore(db))
+	if err := setUpAdmin(ctx, admin, auth.NewStore(db), cfg, log); err != nil {
+		return err
+	}
 	if cfg.MCPToken != "" {
 		log.Info("mcp.enabled", "endpoint", "/mcp")
-	}
-	if admin.Enabled() {
-		log.Info("auth.enabled", "user", cfg.AdminUser)
-	} else {
-		log.Warn("auth.disabled", "hint", "set GLANCE_ADMIN_USER and GLANCE_ADMIN_PASSWORD to protect the dashboard")
 	}
 
 	writer := events.NewWriter(db, log)
@@ -118,7 +116,7 @@ func run() error {
 
 	srv := &api.Server{
 		DB: db, Log: log, Sites: siteStore, Settings: st, Writer: writer, Stats: statsStore,
-		Favicons: fetcher, Admin: admin, Web: web.Handler(), TrustProxy: true, MCPToken: cfg.MCPToken,
+		Favicons: fetcher, Admin: admin, AdminStore: auth.NewStore(db), Web: web.Handler(), TrustProxy: true, MCPToken: cfg.MCPToken,
 		TrustedProxyHops: cfg.TrustedProxyHops, AllowLocalEvents: cfg.AllowLocalEvents,
 		SnippetPath: cfg.SnippetPath, CollectPath: cfg.CollectPath,
 		CollectLimiter: ratelimit.New(cfg.CollectPerSecond, cfg.CollectBurst),
@@ -164,6 +162,59 @@ func run() error {
 	// Final rollup so nothing written in the last minutes is lost to the UI.
 	_ = rollup.Run(context.Background(), db, log, time.Now())
 	return nil
+}
+
+// setUpAdmin decides where the administrator credential comes from, and makes
+// sure there is one.
+//
+// Order of precedence: an explicit request to run without a login, then the
+// environment, then the database. If none of those yields a credential, one is
+// generated and printed once — an instance is never left open because a
+// variable was forgotten, which is what used to happen.
+func setUpAdmin(ctx context.Context, admin *auth.Admin, store *auth.Store, cfg config.Config, log *slog.Logger) error {
+	if cfg.DisableAuth {
+		admin.Disable()
+		log.Warn("auth.disabled",
+			"reason", "GLANCE_DISABLE_AUTH is set",
+			"hint", "every dashboard and admin endpoint is open to anyone who can reach this port")
+		return nil
+	}
+	if cfg.AdminUser != "" {
+		if err := admin.SetEnv(cfg.AdminUser, cfg.AdminPassword); err != nil {
+			return fmt.Errorf("GLANCE_ADMIN_PASSWORD: %w", err)
+		}
+		log.Info("auth.enabled", "user", cfg.AdminUser, "source", "environment")
+		return nil
+	}
+	switch cred, err := store.Get(ctx); {
+	case err == nil:
+		admin.SetStored(cred)
+		log.Info("auth.enabled", "user", cred.Username, "source", cred.Source)
+		if cred.Source == auth.SourceGenerated {
+			log.Warn("auth.generated_password_in_use",
+				"hint", "change it in Settings, or set GLANCE_ADMIN_USER and GLANCE_ADMIN_PASSWORD")
+		}
+		return nil
+	case errors.Is(err, auth.ErrNoCredential):
+		password := auth.GeneratePassword()
+		hash, err := auth.HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("generate the first admin password: %w", err)
+		}
+		const username = "admin"
+		if err := store.Save(ctx, username, hash, auth.SourceGenerated); err != nil {
+			return fmt.Errorf("store the first admin password: %w", err)
+		}
+		admin.SetStored(auth.Credential{Username: username, PasswordHash: hash, Source: auth.SourceGenerated})
+		// Printed once, at Warn so it is not lost in a quiet log level. It
+		// cannot be shown again: only the derivation is kept.
+		log.Warn("auth.first_run_credential",
+			"user", username, "password", password,
+			"hint", "this is shown once; sign in and change it in Settings")
+		return nil
+	default:
+		return fmt.Errorf("read the admin credential: %w", err)
+	}
 }
 
 // maintenance rolls up every minute, prunes raw events hourly and refreshes

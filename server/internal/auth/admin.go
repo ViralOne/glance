@@ -1,5 +1,11 @@
-// Package auth guards the admin UI and API with a single username/password
-// taken from the environment.
+// Package auth guards the admin UI and API with a single administrator login.
+//
+// The credential comes from the environment when GLANCE_ADMIN_USER and
+// GLANCE_ADMIN_PASSWORD are set, and otherwise from the database, where it can
+// be changed from the dashboard. If neither exists, one is generated on first
+// boot and printed once to the log: an instance is never silently public, which
+// is what happened before when the environment variables were simply forgotten.
+// GLANCE_DISABLE_AUTH is the deliberate way to run without a login.
 package auth
 
 import (
@@ -21,45 +27,172 @@ const SessionCookie = "glance_session"
 // SessionTTL is how long an admin login lasts.
 const SessionTTL = 30 * 24 * time.Hour
 
-// Admin guards /admin and the admin endpoints. When Enabled is false
-// everything is open (only sensible behind your own proxy or VPN).
+// Admin guards the dashboard and the admin endpoints. When Enabled is false
+// everything is open, which now only happens if the operator asked for it.
 //
 // Sessions are kept in memory and, when a SessionStore is set, in SQLite so
-// they survive restarts. A session is only valid for the password it was
+// they survive restarts. A session is only valid for the password hash it was
 // created with, so changing the password logs everyone out.
 type Admin struct {
-	username string
-	password string // stored hashed
-	enabled  bool
-	store    *SessionStore
+	store *SessionStore
 
 	mu       sync.Mutex
+	username string
+	password string // PBKDF2 encoding; see credential.go
+	enabled  bool
+	// fromEnv means the credential came from the environment and cannot be
+	// changed from the dashboard: the environment would override it on the
+	// next restart, so offering the change would be a lie.
+	fromEnv bool
+	source  string
+
 	sessions map[string]time.Time // token hash -> expiry (cache)
+	// verified caches credentials already proven correct, so repeated HTTP
+	// Basic requests do not each pay the KDF. A wrong guess is never cached,
+	// so brute force still costs an attacker the full derivation every time.
+	verified map[string]time.Time
 	now      func() time.Time
 }
 
-// NewAdmin returns an Admin; it is enabled only when both values are non-empty.
-func NewAdmin(username, password string, store *SessionStore) *Admin {
-	a := &Admin{sessions: map[string]time.Time{}, now: time.Now, store: store}
-	if username != "" && password != "" {
-		a.enabled = true
-		a.username = username
-		a.password = Hash(password)
+// verifiedTTL is how long a proven credential stays cached.
+const verifiedTTL = time.Minute
+
+// NewAdmin returns an Admin with no credential yet; call SetEnv or Load.
+func NewAdmin(store *SessionStore) *Admin {
+	return &Admin{
+		sessions: map[string]time.Time{},
+		verified: map[string]time.Time{},
+		now:      time.Now,
+		store:    store,
 	}
-	return a
 }
 
-// Enabled reports whether admin authentication is configured.
-func (a *Admin) Enabled() bool { return a != nil && a.enabled }
+// SetEnv installs a credential from the environment, which takes precedence
+// over anything stored and cannot be changed from the dashboard.
+func (a *Admin) SetEnv(username, password string) error {
+	hash, err := HashPassword(password)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.username, a.password, a.enabled, a.fromEnv, a.source = username, hash, true, true, SourceEnv
+	a.credentialChangedLocked()
+	return nil
+}
 
-// Check verifies a username/password pair in constant time.
-func (a *Admin) Check(username, password string) bool {
-	if !a.Enabled() {
+// SetStored installs a credential read from the database.
+func (a *Admin) SetStored(c Credential) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.fromEnv {
+		return // the environment wins
+	}
+	a.username, a.password, a.enabled, a.source = c.Username, c.PasswordHash, true, c.Source
+	a.credentialChangedLocked()
+}
+
+// credentialChangedLocked drops both caches after the credential changes.
+//
+// Clearing the session cache is not tidiness. Valid() answers from that cache
+// without re-checking the password, and only the database fallback compares the
+// stored hash — so a session opened against the old password kept working after
+// a change until the process restarted. Emptying the cache forces every session
+// back through the database, where the hash comparison rejects it.
+//
+// Callers must hold a.mu.
+func (a *Admin) credentialChangedLocked() {
+	a.sessions = map[string]time.Time{}
+	a.verified = map[string]time.Time{}
+}
+
+// Disable turns authentication off. Only for GLANCE_DISABLE_AUTH.
+func (a *Admin) Disable() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.enabled, a.source = false, ""
+}
+
+// Enabled reports whether admin authentication is in force.
+func (a *Admin) Enabled() bool {
+	if a == nil {
 		return false
 	}
-	u := subtle.ConstantTimeCompare([]byte(Hash(username)), []byte(Hash(a.username))) == 1
-	p := subtle.ConstantTimeCompare([]byte(Hash(password)), []byte(a.password)) == 1
-	return u && p
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.enabled
+}
+
+// FromEnv reports whether the credential is pinned by the environment.
+func (a *Admin) FromEnv() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fromEnv
+}
+
+// Source reports where the credential came from: env, generated or set.
+func (a *Admin) Source() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.source
+}
+
+// Username returns the administrator's name, for display.
+func (a *Admin) Username() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.username
+}
+
+// Check verifies a username/password pair.
+//
+// The username is compared in constant time and the password through the KDF,
+// and both are always evaluated so a wrong username costs the same as a wrong
+// password. Returning early on the username would leak which names exist.
+func (a *Admin) Check(username, password string) bool {
+	a.mu.Lock()
+	enabled, wantUser, wantPass := a.enabled, a.username, a.password
+	cacheKey := Hash(username + "\x00" + password + "\x00" + wantPass)
+	if exp, ok := a.verified[cacheKey]; ok && a.now().Before(exp) {
+		a.mu.Unlock()
+		return true
+	}
+	a.mu.Unlock()
+	if !enabled {
+		return false
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(Hash(username)), []byte(Hash(wantUser))) == 1
+	passOK := VerifyPassword(wantPass, password)
+	if !(userOK && passOK) {
+		return false
+	}
+	a.mu.Lock()
+	a.verified[cacheKey] = a.now().Add(verifiedTTL)
+	// The cache is only ever as large as the number of distinct correct
+	// credentials, which is one, plus expired entries; sweep them.
+	for k, exp := range a.verified {
+		if a.now().After(exp) {
+			delete(a.verified, k)
+		}
+	}
+	a.mu.Unlock()
+	return true
+}
+
+// PasswordHash returns the stored encoding, for session invalidation.
+func (a *Admin) PasswordHash() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.password
 }
 
 // Login creates a session and returns its raw token.
@@ -71,9 +204,13 @@ func (a *Admin) Login(ctx context.Context, username, password string) (string, b
 	exp := a.now().Add(SessionTTL)
 	a.mu.Lock()
 	a.sessions[Hash(tok)] = exp
+	pw := a.password
 	a.mu.Unlock()
 	if a.store != nil {
-		_ = a.store.Save(ctx, Hash(tok), a.password, exp)
+		// The password encoding is stored with the session, so changing the
+		// password invalidates every session that was opened against the old
+		// one without needing to enumerate them.
+		_ = a.store.Save(ctx, Hash(tok), pw, exp)
 	}
 	return tok, true
 }
@@ -96,10 +233,11 @@ func (a *Admin) Valid(ctx context.Context, token string) bool {
 	h := Hash(token)
 	a.mu.Lock()
 	exp, ok := a.sessions[h]
+	current := a.password
 	a.mu.Unlock()
 	if !ok && a.store != nil {
 		pw, storedExp, found, err := a.store.Lookup(ctx, h)
-		if err != nil || !found || !Equal(pw, a.password) {
+		if err != nil || !found || !Equal(pw, current) {
 			return false
 		}
 		exp, ok = storedExp, true

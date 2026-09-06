@@ -82,8 +82,11 @@ type Server struct {
 	Stats    *stats.Store
 	Favicons *favicons.Fetcher
 	Admin    *auth.Admin
-	Web      http.Handler
-	Now      func() time.Time
+	// AdminStore persists the credential when it is not pinned by the
+	// environment, so it can be changed from the dashboard.
+	AdminStore *auth.Store
+	Web        http.Handler
+	Now        func() time.Time
 	// TrustProxy trusts the reverse proxy's X-Forwarded-Proto when rebuilding
 	// absolute URLs (OAuth redirects, webhook URLs).
 	TrustProxy bool
@@ -212,6 +215,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/me", s.authMe)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
+	mux.Handle("POST /api/v1/auth/password", s.adminAuth(s.changePassword))
 
 	// Admin.
 	mux.Handle("GET /api/v1/sites", s.adminAuth(s.listSites))
@@ -633,7 +637,80 @@ func peerIP(r *http.Request) string {
 // ---- auth ----
 
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"auth_required": s.Admin.Enabled(), "authenticated": s.Admin.Authorized(r)})
+	authed := s.Admin.Authorized(r)
+	out := map[string]any{"auth_required": s.Admin.Enabled(), "authenticated": authed}
+	if authed && s.Admin.Enabled() {
+		// Only to someone already signed in: whether the password is still the
+		// generated one is a hint worth acting on, and not worth leaking.
+		out["username"] = s.Admin.Username()
+		out["source"] = s.Admin.Source()
+		out["can_change"] = !s.Admin.FromEnv()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// changePassword updates the stored administrator credential.
+//
+// The current password is required even though the caller is already signed in,
+// because a session is a long-lived bearer token: someone with a stolen cookie
+// should not be able to lock the owner out. Changing it invalidates every
+// session, including the caller's, because sessions are bound to the password
+// hash they were created against.
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	if !s.Admin.Enabled() {
+		writeError(w, http.StatusUnprocessableEntity, "auth_disabled", "authentication is turned off, so there is no password to change")
+		return
+	}
+	if s.Admin.FromEnv() {
+		writeError(w, http.StatusConflict, "env_managed",
+			"the login comes from GLANCE_ADMIN_USER and GLANCE_ADMIN_PASSWORD; change it there, since the environment overrides this on restart")
+		return
+	}
+	var in struct {
+		Username        string `json:"username"`
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	// Rate limited like a sign-in: this endpoint verifies a password too.
+	if !s.LoginLimiter.Allow(s.clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "too_many_attempts", "too many attempts; wait a moment and try again")
+		return
+	}
+	username := strings.TrimSpace(in.Username)
+	if username == "" {
+		username = s.Admin.Username()
+	}
+	if len(username) > 60 {
+		writeError(w, http.StatusUnprocessableEntity, "invalid", "username must be 60 characters or fewer")
+		return
+	}
+	if !s.Admin.Check(s.Admin.Username(), in.CurrentPassword) {
+		s.Log.Warn("auth.change_password_rejected", "remote", s.clientIP(r))
+		writeError(w, http.StatusUnauthorized, "bad_credentials", "the current password is wrong")
+		return
+	}
+	hash, err := auth.HashPassword(in.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "weak_password", err.Error())
+		return
+	}
+	if s.AdminStore == nil {
+		s.fail(w, errors.New("no credential store configured"))
+		return
+	}
+	if err := s.AdminStore.Save(r.Context(), username, hash, auth.SourceSet); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.Admin.SetStored(auth.Credential{Username: username, PasswordHash: hash, Source: auth.SourceSet})
+	s.Log.Info("auth.password_changed", "user", username)
+	// The caller's own session was bound to the old hash and is now dead, so
+	// clear the cookie rather than leaving the browser holding a dud.
+	s.Admin.ClearCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "changed", "username": username, "signed_out": true})
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
@@ -648,10 +725,16 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
+	// The limiter is keyed by address, not by username, so guessing a
+	// different name each time does not buy an attacker a fresh budget.
+	if !s.LoginLimiter.Allow(s.clientIP(r)) {
+		s.Log.Warn("auth.login_rate_limited", "remote", s.clientIP(r))
+		writeError(w, http.StatusTooManyRequests, "too_many_attempts", "too many sign-in attempts; wait a moment and try again")
+		return
+	}
 	tok, ok := s.Admin.Login(r.Context(), in.Username, in.Password)
 	if !ok {
-		time.Sleep(400 * time.Millisecond)
-		s.Log.Warn("auth.login_failed", "remote", r.RemoteAddr)
+		s.Log.Warn("auth.login_failed", "remote", s.clientIP(r))
 		writeError(w, http.StatusUnauthorized, "bad_credentials", "wrong username or password")
 		return
 	}

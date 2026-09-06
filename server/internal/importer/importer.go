@@ -239,9 +239,10 @@ func (i *Importer) write(ctx context.Context, siteID, format string, p *parsed) 
 				res.Rows++
 			}
 		}
-		// Imported days have no hourly detail; a flat line would be a lie, so
-		// the hourly table is cleared for the day and the chart falls back to
-		// daily buckets for ranges that span imported history.
+		// Imported days have no hourly detail, and spreading a day's total
+		// across 24 hours would invent a shape nobody measured. The hourly
+		// table is therefore cleared for the day, and stats.Summary detects
+		// days like this and buckets the whole chart by day instead.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM hourly_stats WHERE site_id = ? AND hour >= ? AND hour < ?`,
 			siteID, d+"T00", d+"T24"); err != nil {
 			return res, err

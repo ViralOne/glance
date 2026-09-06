@@ -63,6 +63,10 @@ type Summary struct {
 	// raw events, so Previous is not a real zero.
 	PreviousUnavailable bool `json:"previous_unavailable,omitempty"`
 	RetentionDays       int  `json:"retention_days,omitempty"`
+	// HourlyUnavailable means the window contains days that were imported from
+	// another tool, which carry a daily total but no hourly detail, so the
+	// chart was bucketed by day even though this range normally charts by hour.
+	HourlyUnavailable bool `json:"hourly_unavailable,omitempty"`
 }
 
 // Window returns [from, to) for a range ending now, plus the bucket size.
@@ -109,25 +113,40 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 // Summary builds the dashboard payload.
 func (s *Store) Summary(ctx context.Context, siteID, rng string, now time.Time, top int) (Summary, error) {
 	from, to, bucket := Window(rng, now)
-	out := Summary{Range: rng, From: from.Format(time.RFC3339), To: to.Format(time.RFC3339), Bucket: bucket, Breakdowns: map[string][]Row{}}
+	// Totals are summed from the series, so the series has to be able to see
+	// every day in the window. Imported history has a daily total and no
+	// hourly rows, which would make an imported day read as zero on the
+	// hourly ranges — the most used ones. Where the window contains such a
+	// day the whole chart drops to daily buckets and says so, rather than
+	// inventing an hourly shape nobody measured.
+	hourlyGap := false
+	if bucket == "hour" {
+		var err error
+		if hourlyGap, err = s.hasImportedDays(ctx, siteID, from, to); err != nil {
+			return Summary{}, err
+		}
+		if hourlyGap {
+			bucket = "day"
+		}
+	}
+	out := Summary{Range: rng, From: from.Format(time.RFC3339), To: to.Format(time.RFC3339), Bucket: bucket,
+		Breakdowns: map[string][]Row{}, HourlyUnavailable: hourlyGap}
 
 	series, err := s.series(ctx, siteID, from, to, bucket)
 	if err != nil {
 		return out, err
 	}
 	out.Series = series
-	for _, p := range series {
-		out.Totals.Pageviews += p.Pageviews
-		out.Totals.Visitors += p.Visitors
-	}
-	span := to.Sub(from)
-	prev, err := s.series(ctx, siteID, from.Add(-span), from, bucket)
-	if err != nil {
+	// Totals are computed separately from the series rather than by summing it.
+	// Summing an hourly series double-counts anyone whose visit crossed an
+	// hour boundary, which made the 7d figure disagree with the index card for
+	// the same seven days. See totals.
+	if out.Totals, err = s.totals(ctx, siteID, from, to); err != nil {
 		return out, err
 	}
-	for _, p := range prev {
-		out.Previous.Pageviews += p.Pageviews
-		out.Previous.Visitors += p.Visitors
+	span := to.Sub(from)
+	if out.Previous, err = s.totals(ctx, siteID, from.Add(-span), from); err != nil {
+		return out, err
 	}
 	for _, dim := range Dims {
 		rows, err := s.breakdown(ctx, siteID, dim, from, to, top)
@@ -272,24 +291,84 @@ func (s *Store) breakdown(ctx context.Context, siteID, dim string, from, to time
 	return out, rows.Err()
 }
 
+// totals counts pageviews and visitors over [from, to).
+//
+// Visitors are daily uniques, summed across days, which is the convention used
+// everywhere else in Glance and the one the README states. That means a whole
+// day must be read from daily_stats: reading it as a sum of hourly uniques
+// counts a visitor once per hour they were active, so a single visitor reading
+// three articles either side of 10:00 becomes two visitors.
+//
+// A window that does not start and end on a day boundary — 24h and 48h do not
+// — has partial days at its edges, and for those the hourly rows are the only
+// thing that covers the right hours. Within a partial day the same
+// over-counting applies; it cannot be avoided without keeping raw events
+// forever, and it is bounded by that one day rather than spread over the whole
+// window.
+func (s *Store) totals(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
+	var out Totals
+	from, to = from.UTC(), to.UTC()
+	for day := from.Truncate(24 * time.Hour); day.Before(to); day = day.AddDate(0, 0, 1) {
+		next := day.AddDate(0, 0, 1)
+		whole := !day.Before(from) && !next.After(to)
+		var t Totals
+		var err error
+		if whole {
+			t, err = s.dayTotals(ctx, siteID, day)
+		} else {
+			lo, hi := day, next
+			if lo.Before(from) {
+				lo = from
+			}
+			if hi.After(to) {
+				hi = to
+			}
+			t, err = s.hourTotals(ctx, siteID, lo, hi)
+		}
+		if err != nil {
+			return out, err
+		}
+		out.Pageviews += t.Pageviews
+		out.Visitors += t.Visitors
+	}
+	return out, nil
+}
+
+func (s *Store) dayTotals(ctx context.Context, siteID string, day time.Time) (Totals, error) {
+	var t Totals
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0)
+		FROM daily_stats WHERE site_id = ? AND dim = 'total' AND day = ?`,
+		siteID, day.Format("2006-01-02")).Scan(&t.Pageviews, &t.Visitors)
+	return t, err
+}
+
+func (s *Store) hourTotals(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
+	var t Totals
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0)
+		FROM hourly_stats WHERE site_id = ? AND hour >= ? AND hour < ?`,
+		siteID, from.Format("2006-01-02T15"), to.Format("2006-01-02T15")).Scan(&t.Pageviews, &t.Visitors)
+	return t, err
+}
+
+// hasImportedDays reports whether any whole day in [from, to) has a daily
+// total but no hourly rows, which is the signature of imported history.
+//
+// A day with genuinely no traffic has neither, so it is not mistaken for one.
+func (s *Store) hasImportedDays(ctx context.Context, siteID string, from, to time.Time) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM daily_stats d
+		WHERE d.site_id = ? AND d.dim = 'total' AND d.day >= ? AND d.day < ? AND d.pageviews > 0
+		AND NOT EXISTS (SELECT 1 FROM hourly_stats h WHERE h.site_id = d.site_id AND h.hour >= d.day || 'T00' AND h.hour < d.day || 'T24')`,
+		siteID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")).Scan(&n)
+	return n > 0, err
+}
+
 // TotalsBetween sums pageviews and visitors over an arbitrary window, using
 // hourly rollups when the window is short enough for them to be exact and
 // daily ones otherwise. Alerts need a window that is not one of the
 // dashboard's ranges, which is why this is separate from Summary.
 func (s *Store) TotalsBetween(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
-	var t Totals
-	// Below a few days the hourly table is both finer and small; above it the
-	// daily table is one row per day instead of twenty-four.
-	if to.Sub(from) <= 7*24*time.Hour {
-		err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0) FROM hourly_stats
-			WHERE site_id = ? AND hour >= ? AND hour < ?`,
-			siteID, from.UTC().Format("2006-01-02T15"), to.UTC().Format("2006-01-02T15")).Scan(&t.Pageviews, &t.Visitors)
-		return t, err
-	}
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0) FROM daily_stats
-		WHERE site_id = ? AND dim = 'total' AND day >= ? AND day < ?`,
-		siteID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")).Scan(&t.Pageviews, &t.Visitors)
-	return t, err
+	return s.totals(ctx, siteID, from, to)
 }
 
 // Breakdown returns every key for one dimension over a range, best first.

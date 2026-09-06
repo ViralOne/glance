@@ -70,6 +70,31 @@ func TestSnippetShape(t *testing.T) {
 	}
 }
 
+// TestFetchIsThePrimaryTransport locks in a decision that looks backwards
+// until you know why.
+//
+// sendBeacon is the obvious transport for analytics and it is deliberately the
+// fallback here. EasyPrivacy carries a blanket rule, "*$ping,third-party",
+// which blocks every third-party sendBeacon whatever the URL is — renaming
+// paths does not help, and neither does a fallback, because a blocked
+// sendBeacon still returns true so the caller cannot tell. The equivalent
+// fetch is matched by nothing. Checked against the real EasyPrivacy and
+// EasyList rules; if someone "tidies" this back to beacon-first, every visitor
+// running uBlock on a site whose collector is on another domain disappears.
+func TestFetchIsThePrimaryTransport(t *testing.T) {
+	s := newServer(t, "", "")
+	rr := do(t, s.Handler(), "GET", "/glance.js", nil, nil)
+	body := rr.Body.String()
+	fetchAt := strings.Index(body, "keepalive")
+	beaconAt := strings.Index(body, "sendBeacon")
+	if fetchAt < 0 || beaconAt < 0 {
+		t.Fatalf("expected both transports in the snippet (fetch %d, beacon %d)", fetchAt, beaconAt)
+	}
+	if fetchAt > beaconAt {
+		t.Error("sendBeacon is being tried before fetch; third-party beacons are blocked by EasyPrivacy")
+	}
+}
+
 // TestVitalsOnlyFlushIsNotAPageview covers the reserved event name the snippet
 // uses when a page is hidden before its vitals could ride along on a pageview.
 // Counting that as a hit would inflate both pageviews and events.

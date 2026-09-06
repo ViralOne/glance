@@ -56,18 +56,31 @@
 
   function send(body) {
     var json = JSON.stringify(body);
-    // sendBeacon survives the page being closed, which is exactly when the
-    // last event of a visit is sent. fetch with keepalive is the fallback.
-    if (!(nav.sendBeacon && nav.sendBeacon(endpoint, json))) {
-      try {
-        fetch(endpoint, {
-          method: "POST",
-          body: json,
-          keepalive: true,
-          headers: { "Content-Type": "text/plain" },
-        }).catch(function () {});
-      } catch (e) {}
-    }
+    // fetch with keepalive is the primary transport and sendBeacon only the
+    // fallback, which is the opposite of the obvious order. The reason is ad
+    // blockers: EasyPrivacy carries a blanket "*$ping,third-party" rule, so
+    // every third-party sendBeacon is blocked outright whatever the URL is,
+    // while the equivalent fetch is not matched by anything. Renaming paths
+    // does not help there, and neither does a fallback — a blocked sendBeacon
+    // still returns true, so the caller cannot tell it failed.
+    //
+    // keepalive is what makes this safe: it exists precisely so a request
+    // survives the page being torn down, which is when the last event of a
+    // visit is sent.
+    try {
+      fetch(endpoint, {
+        method: "POST",
+        body: json,
+        keepalive: true,
+        // A simple content type keeps this a CORS-safelisted request, so
+        // there is no preflight on the collector.
+        headers: { "Content-Type": "text/plain" },
+        mode: "cors",
+        credentials: "omit",
+      }).catch(function () {});
+      return;
+    } catch (e) {}
+    if (nav.sendBeacon) nav.sendBeacon(endpoint, json);
   }
 
   function base(name) {

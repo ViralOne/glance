@@ -2,6 +2,7 @@
   // Per-site dashboard: metrics, chart, breakdowns, world map, settings.
   import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type FunnelResult, type GoalResult, type GoogleStatus, type Live, type Note, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, IMPORT_FORMATS, type Share, type ImportFormat, type ImportResult, type Site, type Summary, type Vitals } from '../lib/api'
   import { setAccentOverride } from '../lib/accent'
+  import { copyText } from '../lib/clipboard'
   import { countryName, flag, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
   import { pageIn, panel } from '../lib/motion'
   import Icon from '../lib/ui/Icon.svelte'
@@ -512,11 +513,13 @@
 
   const snippet = $derived(site ? `<script defer src="${location.origin}/glance.js" data-site="${site.id}"><\/script>` : '')
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(snippet)
+    if (await copyText(snippet)) {
       copied = true
       setTimeout(() => (copied = false), 1500)
-    } catch {}
+      return
+    }
+    // Better to say so than to leave the button looking broken.
+    error = 'Could not copy automatically. Select the snippet and copy it manually.'
   }
   let timers: Record<string, ReturnType<typeof setTimeout>> = {}
   function save(patch: Parameters<typeof api.updateSite>[1], key: string) {
@@ -676,7 +679,7 @@
         >
           {#snippet row(item)}
             {@const sh = shares.find((x) => x.slug === item.id)!}
-            <button class="prop" type="button" onclick={() => navigator.clipboard?.writeText(sh.url)} title="Copy">
+            <button class="prop" type="button" onclick={() => copyText(sh.url)} title="Copy">
               {sh.url}
             </button>
             {#if sh.has_password}<span class="quiet"> · password set</span>{/if}

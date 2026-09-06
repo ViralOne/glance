@@ -1,6 +1,7 @@
 <script lang="ts">
   // General settings: overview, appearance, MCP and API tokens, retention, export.
   import { api, type Alert, type AlertChannel, type AlertKind, type AlertMetric, type GeneralSettings, type Status, type Token } from '../lib/api'
+  import { copyText } from '../lib/clipboard'
   import { fmtNum } from '../lib/format'
   import { isHex, setBaseAccent } from '../lib/accent'
   import { panel, reorder } from '../lib/motion'
@@ -142,11 +143,12 @@
       .catch((e: any) => (error = e.message))
   }
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text)
+    if (await copyText(text)) {
       copied = true
       setTimeout(() => (copied = false), 1500)
-    } catch {}
+      return
+    }
+    error = 'Could not copy automatically. Select the text and copy it manually.'
   }
   const mcpURL = `${location.origin}/mcp`
   const mcpConfig = $derived(JSON.stringify({ mcpServers: { glance: { url: mcpURL, headers: { Authorization: `Bearer ${minted?.secret ?? 'glance_tok_…'}` } } } }, null, 2))

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Root index of tracked websites, with add form and tracking code.
   import { api, siteIconURL, type Site } from '../lib/api'
+  import { copyText } from '../lib/clipboard'
   import { fmtDelta, fmtNum } from '../lib/format'
   import { link } from '../lib/router.svelte'
   import { panel, reorder } from '../lib/motion'
@@ -59,11 +60,12 @@
   }
   const snippet = (s: Site) => `<script defer src="${location.origin}/glance.js" data-site="${s.id}"><\/script>`
   async function copy(s: Site) {
-    try {
-      await navigator.clipboard.writeText(snippet(s))
+    if (await copyText(snippet(s))) {
       copied = true
       setTimeout(() => (copied = false), 1500)
-    } catch {}
+      return
+    }
+    error = 'Could not copy automatically. Select the snippet and copy it manually.'
   }
   function dropOn(target: Site) {
     const from = dragging

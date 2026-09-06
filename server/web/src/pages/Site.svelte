@@ -1,6 +1,6 @@
 <script lang="ts">
   // Per-site dashboard: metrics, chart, breakdowns, world map, settings.
-  import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type FunnelResult, type GoalResult, type GoogleStatus, type Live, type Note, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, type Site, type Summary, type Vitals } from '../lib/api'
+  import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type FunnelResult, type GoalResult, type GoogleStatus, type Live, type Note, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, IMPORT_FORMATS, type Share, type ImportFormat, type ImportResult, type Site, type Summary, type Vitals } from '../lib/api'
   import { setAccentOverride } from '../lib/accent'
   import { countryName, flag, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
   import { pageIn, panel } from '../lib/motion'
@@ -9,6 +9,9 @@
   import Swatches from '../lib/ui/Swatches.svelte'
   import MetricStat from '../lib/ui/MetricStat.svelte'
   import BarList, { type BarRow } from '../lib/ui/BarList.svelte'
+  import Manage from '../lib/ui/Manage.svelte'
+  import Funnels from '../lib/ui/Funnels.svelte'
+  import VitalsCard from '../lib/ui/Vitals.svelte'
   import AreaChart from '../lib/ui/AreaChart.svelte'
   import Input from '../lib/ui/Input.svelte'
   import Button from '../lib/ui/Button.svelte'
@@ -326,7 +329,14 @@
       case 'country':
         return sorted.map((r) => ({ key: r.key || 'XX', label: countryName(r.key), value: r.visitors, prefix: flag(r.key), title: `${fmtNum(r.pageviews)} views` }))
       case 'event':
-        return sorted.map((r) => ({ key: r.key, label: r.key, value: r.pageviews, title: `${fmtNum(r.visitors)} visitors` }))
+      case 'prop':
+        return sorted.map((r) => ({ key: r.key, label: r.key, value: r.pageviews, title: `${fmtNum(r.visitors)} visitors${r.value ? ` · ${money(r.value)}` : ''}` }))
+      case 'bot':
+      case 'aibot':
+        // Crawlers are never counted as visitors, so a crawler row measured in
+        // visitors would read zero for every one of them. Requests is the only
+        // number these rows have.
+        return sorted.map((r) => ({ key: r.key, label: r.key, value: r.pageviews, title: `${fmtNum(r.pageviews)} requests, never counted as visitors` }))
       default:
         return sorted.map((r) => ({ key: r.key || '∅', label: r.key || 'Unknown', value: r.visitors, title: `${fmtNum(r.pageviews)} views` }))
     }
@@ -409,6 +419,74 @@
     range
     loadFeatures()
   })
+
+  // ---- management: goals, funnels, notes, shares, import ----
+  let manageBusy = $state(false)
+  let shares = $state<Share[]>([])
+  let goalForm = $state({ name: '', target: '', value: '' })
+  let funnelForm = $state({ name: '', steps: '' })
+  let noteForm = $state({ day: '', text: '' })
+  let importFormat = $state<ImportFormat>('plausible')
+  let importFile = $state<File | null>(null)
+  let importResult = $state<ImportResult | null>(null)
+
+  async function manage(run: () => Promise<unknown>) {
+    manageBusy = true
+    try {
+      await run()
+      error = ''
+      await loadFeatures()
+      await loadShares()
+    } catch (e: any) {
+      error = e.message
+    } finally {
+      manageBusy = false
+    }
+  }
+  async function loadShares() {
+    try {
+      shares = (await api.shares(id)).shares
+    } catch {
+      shares = []
+    }
+  }
+  $effect(() => {
+    loadShares()
+  })
+
+  const addGoal = () =>
+    manage(async () => {
+      await api.createGoal(id, {
+        name: goalForm.name.trim() || undefined,
+        target: goalForm.target.trim(),
+        value: goalForm.value.trim() ? Math.round(Number(goalForm.value) * 100) : undefined,
+      })
+      goalForm = { name: '', target: '', value: '' }
+    })
+  // Steps are typed one per line: a repeater for three fields is more UI than
+  // the task needs, and a path or an event name is already one line of text.
+  const addFunnel = () =>
+    manage(async () => {
+      const steps = funnelForm.steps
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((target) => ({ name: target, kind: target.startsWith('/') ? ('path' as const) : ('event' as const), target }))
+      await api.createFunnel(id, { name: funnelForm.name.trim() || undefined, steps })
+      funnelForm = { name: '', steps: '' }
+    })
+  const addNote = () =>
+    manage(async () => {
+      await api.createNote(id, { text: noteForm.text.trim(), day: noteForm.day.trim() || undefined })
+      noteForm = { day: '', text: '' }
+    })
+  const addShare = () => manage(() => api.createShare(id))
+  const runImport = () =>
+    manage(async () => {
+      if (!importFile) return
+      importResult = await api.importData(id, importFormat, importFile)
+      importFile = null
+    })
   const events = $derived(rowsFor('event'))
 
   // "View all" modal.
@@ -505,6 +583,143 @@
       <div class="setting">
         <div class="text"><div class="label">Favicon</div><div class="hint">Fetched from your site by Glance, never from a third party</div></div>
         <Button variant="secondary" size="sm" onclick={() => api.refreshFavicon(id).then((s) => (site = { ...site!, ...s }))}>Refresh</Button>
+      </div>
+
+      <div class="setting google">
+        <Manage
+          title="Goals"
+          hint="An event name, or a page path starting with /. A trailing * matches a prefix."
+          items={goalResults}
+          empty="No goals yet."
+          busy={manageBusy}
+          addLabel="Add goal"
+          canAdd={goalForm.target.trim() !== ''}
+          onadd={addGoal}
+          onremove={(g) => manage(() => api.deleteGoal(id, g))}
+        >
+          {#snippet row(item)}
+            {@const g = goalResults.find((x) => x.id === item.id)!}
+            <span>{g.name}</span>
+            <span class="quiet"> · {g.kind === 'path' ? g.target : `event ${g.target}`} · {fmtNum(g.conversions)} in {range}</span>
+          {/snippet}
+          {#snippet form()}
+            <Input bind:value={goalForm.target} placeholder="signup, or /thanks" aria-label="Goal target" mono />
+            <Input bind:value={goalForm.name} placeholder="Display name (optional)" aria-label="Goal name" />
+            <Input bind:value={goalForm.value} placeholder="Worth per conversion, e.g. 19.00 (optional)" aria-label="Goal value" />
+          {/snippet}
+        </Manage>
+      </div>
+
+      <div class="setting google">
+        <Manage
+          title="Funnels"
+          hint="Two to eight steps, one per line, in order. A line starting with / is a page, anything else an event."
+          items={funnelResults}
+          empty="No funnels yet."
+          busy={manageBusy}
+          addLabel="Add funnel"
+          canAdd={funnelForm.steps.split('\n').filter((l) => l.trim()).length >= 2}
+          onadd={addFunnel}
+          onremove={(f) => manage(() => api.deleteFunnel(id, f))}
+        >
+          {#snippet row(item)}
+            {@const f = funnelResults.find((x) => x.id === item.id)!}
+            <span>{f.name}</span>
+            <span class="quiet"> · {f.steps.map((st) => st.target).join(' → ')}</span>
+          {/snippet}
+          {#snippet form()}
+            <Input bind:value={funnelForm.name} placeholder="Name (optional)" aria-label="Funnel name" />
+            <textarea
+              bind:value={funnelForm.steps}
+              rows="4"
+              placeholder={'/\n/pricing\nsignup'}
+              aria-label="Funnel steps, one per line"
+            ></textarea>
+          {/snippet}
+        </Manage>
+      </div>
+
+      <div class="setting google">
+        <Manage
+          title="Notes"
+          hint="Dated annotations, so a spike still has a reason next to it a month later."
+          items={notes}
+          empty="No notes in this range."
+          busy={manageBusy}
+          addLabel="Add note"
+          canAdd={noteForm.text.trim() !== ''}
+          onadd={addNote}
+          onremove={(n) => manage(() => api.deleteNote(id, n))}
+        >
+          {#snippet row(item)}
+            {@const n = notes.find((x) => x.id === item.id)!}
+            <span class="mono">{n.day}</span>
+            <span> {n.text}</span>
+          {/snippet}
+          {#snippet form()}
+            <Input bind:value={noteForm.text} placeholder="Launched on Product Hunt" aria-label="Note text" />
+            <Input bind:value={noteForm.day} placeholder="YYYY-MM-DD (blank = today)" aria-label="Note day" mono />
+          {/snippet}
+        </Manage>
+      </div>
+
+      <div class="setting google">
+        <Manage
+          title="Shared dashboards"
+          hint="A read-only link anyone can open, with no account. The address is the credential, so treat it like one."
+          items={shares.map((sh) => ({ id: sh.slug }))}
+          empty="Not shared."
+          busy={manageBusy}
+          addLabel="Create link"
+          onadd={addShare}
+          onremove={(slug) => manage(() => api.deleteShare(id, slug))}
+        >
+          {#snippet row(item)}
+            {@const sh = shares.find((x) => x.slug === item.id)!}
+            <button class="prop" type="button" onclick={() => navigator.clipboard?.writeText(sh.url)} title="Copy">
+              {sh.url}
+            </button>
+            {#if sh.has_password}<span class="quiet"> · password set</span>{/if}
+          {/snippet}
+          {#snippet form()}
+            <div class="hint">Creates an unguessable link. Add a password afterwards if you need one.</div>
+          {/snippet}
+        </Manage>
+      </div>
+
+      <div class="setting google">
+        <div class="text">
+          <div class="label">Import history</div>
+          <div class="hint">
+            Loads another tool's export into this site's daily history, which is kept forever. Imported
+            days have no hourly detail and cannot be filtered, because the export has no individual
+            events in it.
+          </div>
+          {#if importResult}
+            <div class="hint ok">
+              Imported {fmtNum(importResult.days)} days, {fmtNum(importResult.visitors)} visitors and
+              {fmtNum(importResult.pageviews)} pageviews ({importResult.from} to {importResult.to}).
+              {#each importResult.warnings as w}<br />{w}{/each}
+            </div>
+          {/if}
+          <div class="polar-form">
+            <select bind:value={importFormat} aria-label="Import format">
+              {#each IMPORT_FORMATS as f}
+                <option value={f.id}>{f.label} — {f.hint}</option>
+              {/each}
+            </select>
+            <input
+              type="file"
+              aria-label="Export file"
+              onchange={(e) => (importFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null)}
+            />
+            <div class="google-actions">
+              <Button size="sm" disabled={manageBusy || !importFile} onclick={runImport}>
+                {manageBusy ? 'Importing' : 'Import'}
+              </Button>
+            </div>
+          </div>
+        </div>
       </div>
       {#if payments}
         {#each PROVIDERS as provider (provider.id)}
@@ -655,6 +870,19 @@
   {#key stats.range}
     <div in:pageIn class="stack">
       <AreaChart series={stats.series} markers={stats.markers} bucket={stats.bucket} {range} revenue={hasFilters ? [] : revenueSeries} currency={revenue?.currency ?? ''} />
+      {#if stats.hourly_unavailable}
+        <p class="chart-note">
+          Charted by day: this range covers history imported from another tool, which carries a daily
+          total but no hourly detail.
+        </p>
+      {/if}
+      {#if notes.length > 0}
+        <ul class="notes">
+          {#each notes as n (n.id)}
+            <li><span class="note-day">{n.day}</span> {n.text}</li>
+          {/each}
+        </ul>
+      {/if}
 
       <div class="grid">
         {#if revenue && !hasFilters}
@@ -747,6 +975,17 @@
         {/if}
       </div>
 
+      {#if !hasFilters && (funnelResults.length > 0 || vitals?.overall.length)}
+        <div class="grid">
+          {#if funnelResults.length > 0}
+            <div class="wide"><Funnels funnels={funnelResults} /></div>
+          {/if}
+          {#if vitals?.overall.length}
+            <VitalsCard overall={vitals.overall} devices={vitals.devices} pages={vitals.pages} />
+          {/if}
+        </div>
+      {/if}
+
       <div class="map-section">
         <div class="head">
           <div class="card-title">{mapView === 'live' ? 'Live' : 'Visitors by country'}</div>
@@ -818,6 +1057,23 @@
   .warn { color: var(--up-text-muted); }
   .polar-form { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 460px; padding-top: 4px; }
   .google-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .quiet { color: var(--up-text-muted); }
+  .mono { font: var(--up-type-code); color: var(--up-ink); }
+  textarea, select, input[type='file'] {
+    font: var(--up-type-code);
+    color: var(--up-ink);
+    background: var(--up-bg);
+    box-shadow: inset 0 0 0 1px var(--up-border-control);
+    border: none;
+    border-radius: var(--up-radius-control);
+    padding: 8px 10px;
+    width: 100%;
+    resize: vertical;
+  }
+  .chart-note { font: var(--up-type-ui); color: var(--up-text-muted); margin: -4px 0 0; }
+  .notes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .notes li { font: var(--up-type-ui); color: var(--up-text-muted); }
+  .note-day { font: var(--up-type-code); color: var(--up-ink); margin-right: 6px; }
   .props { display: flex; flex-wrap: wrap; gap: 6px; }
   .prop { font: var(--up-type-code); color: var(--up-ink); background: var(--up-bg-hover); border: none; border-radius: var(--up-radius-control); padding: 4px 8px; cursor: pointer; }
   .prop:hover { box-shadow: inset 0 0 0 1px var(--up-border-control); }

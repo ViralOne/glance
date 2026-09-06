@@ -13,6 +13,9 @@
   let authRequired = $state(false)
   let needsLogin = $state<boolean | null>(null)
   let title = $state('Glance')
+  // Carried to the login screen so being thrown back there is explained rather
+  // than looking like the session broke.
+  let notice = $state('')
 
   // Accent and title are public so the login screen matches too.
   $effect(() => {
@@ -52,6 +55,7 @@
   })
   async function signOut() {
     await api.logout().catch(() => {})
+    notice = ''
     needsLogin = true
   }
   const route = $derived(router.route)
@@ -59,9 +63,14 @@
 
 <div class="page" class:wide={route.name === 'site'}>
   <header>
-    <a href="/" onclick={link} class="brand"><Logo {title} crumb={route.name === 'site' ? 'Analytics' : route.name === 'settings' ? 'Settings' : ''} /></a>
+    <!-- The crumb names a page you cannot see while signed out, so it is dropped
+         until there is something behind it. -->
+    <a href="/" onclick={link} class="brand"><Logo {title} crumb={needsLogin !== false ? '' : route.name === 'site' ? 'Analytics' : route.name === 'settings' ? 'Settings' : ''} /></a>
     <div class="right">
-      {#if route.name !== 'sites'}<a href="/" onclick={link}>← Websites</a>{/if}
+      <!-- No navigation while signed out: the only thing that works on this
+           screen is the form, and a link back to a page that will bounce you
+           here again is just noise. -->
+      {#if needsLogin === false && route.name !== 'sites'}<a href="/" onclick={link}>← Websites</a>{/if}
       {#if needsLogin === false && route.name !== 'settings'}
         <a href="/settings" onclick={link} class="gear" title="Settings" aria-label="Settings">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 8.9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
@@ -73,7 +82,13 @@
   </header>
 
   {#if needsLogin}
-    <Login onsuccess={boot} />
+    <Login
+      {notice}
+      onsuccess={() => {
+        notice = ''
+        boot()
+      }}
+    />
   {:else if needsLogin === false}
     {#key router.path}
       <div in:pageIn class="body">
@@ -82,7 +97,13 @@
         {:else if route.name === 'site'}
           <Site id={route.params.id} />
         {:else if route.name === 'settings'}
-          <Settings ontitle={(t) => (title = t || 'Glance')} />
+          <Settings
+            ontitle={(t) => (title = t || 'Glance')}
+            onsignedout={(reason) => {
+              notice = reason
+              needsLogin = true
+            }}
+          />
         {:else}
           <p class="muted">Nothing here. <a href="/" onclick={link}>Back to websites</a>.</p>
         {/if}

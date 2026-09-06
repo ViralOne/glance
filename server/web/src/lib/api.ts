@@ -117,6 +117,12 @@ export interface Site {
 export interface AuthState {
   auth_required: boolean
   authenticated: boolean
+  /** Only sent to a caller who is already signed in. */
+  username?: string
+  /** Where the credential came from: generated on first boot, set by you, or the environment. */
+  source?: 'generated' | 'set' | 'env'
+  /** False when the environment owns the credential, since a restart would overwrite a change. */
+  can_change?: boolean
 }
 
 export interface Status {
@@ -407,6 +413,8 @@ export const api = {
   me: () => request<AuthState>('GET', '/api/v1/auth/me'),
   login: (username: string, password: string) => request<AuthState>('POST', '/api/v1/auth/login', { username, password }),
   logout: () => request<void>('POST', '/api/v1/auth/logout'),
+  changePassword: (input: { username?: string; current_password: string; new_password: string }) =>
+    request<{ status: string; username: string; signed_out: boolean }>('POST', '/api/v1/auth/password', input),
 
   sites: () => request<{ sites: Site[] }>('GET', '/api/v1/sites'),
   site: (id: string) => request<Site>('GET', `/api/v1/sites/${id}`),

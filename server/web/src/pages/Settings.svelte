@@ -1,18 +1,19 @@
 <script lang="ts">
-  // General settings: overview, appearance, MCP and API tokens, retention, export.
-  import { api, type Alert, type AlertChannel, type AlertKind, type AlertMetric, type GeneralSettings, type Status, type Token } from '../lib/api'
+  // General settings: account, appearance, MCP and API tokens, retention, export.
+  import { api, type Alert, type AlertChannel, type AlertKind, type AlertMetric, type AuthState, type GeneralSettings, type Status, type Token } from '../lib/api'
   import { copyText } from '../lib/clipboard'
   import { fmtNum } from '../lib/format'
   import { isHex, setBaseAccent } from '../lib/accent'
   import { panel, reorder } from '../lib/motion'
   import Input from '../lib/ui/Input.svelte'
   import Button from '../lib/ui/Button.svelte'
+  import PasswordInput from '../lib/ui/PasswordInput.svelte'
   import Switch from '../lib/ui/Switch.svelte'
   import Segment from '../lib/ui/Segment.svelte'
   import Swatches from '../lib/ui/Swatches.svelte'
   import MetricStat from '../lib/ui/MetricStat.svelte'
 
-  let { ontitle }: { ontitle: (t: string) => void } = $props()
+  let { ontitle, onsignedout }: { ontitle: (t: string) => void; onsignedout: (reason: string) => void } = $props()
   let status = $state<Status | null>(null)
   let settings = $state<GeneralSettings | null>(null)
   let tokens = $state<Token[]>([])
@@ -82,6 +83,59 @@
       alertBusy = false
     }
   }
+  // ---- account ----
+  // Mirrors auth.MinPasswordLength on the server, so the form can say no before
+  // a round trip. The server still checks; this is only to be quicker about it.
+  const minPassword = 8
+  let auth = $state<AuthState | null>(null)
+  let pwUser = $state('')
+  let pwCurrent = $state('')
+  let pwNext = $state('')
+  let pwConfirm = $state('')
+  let pwBusy = $state(false)
+  let pwError = $state('')
+  let pwDone = $state('')
+  const pwProblem = $derived(
+    !pwCurrent
+      ? 'Enter your current password.'
+      : pwNext.length < minPassword
+        ? `The new password needs at least ${minPassword} characters.`
+        : pwNext === pwCurrent
+          ? 'The new password is the same as the current one.'
+          : pwConfirm !== pwNext
+            ? 'The two new passwords do not match.'
+            : '',
+  )
+  async function loadAuth() {
+    try {
+      auth = await api.me()
+      pwUser = auth.username ?? ''
+    } catch {
+      auth = null
+    }
+  }
+  async function submitPassword() {
+    if (pwProblem) return
+    pwBusy = true
+    pwError = ''
+    try {
+      const r = await api.changePassword({
+        username: pwUser.trim() || undefined,
+        current_password: pwCurrent,
+        new_password: pwNext,
+      })
+      pwCurrent = pwNext = pwConfirm = ''
+      // Every session was bound to the old hash, including this one, so there is
+      // no way to stay signed in here. Say so, then hand back to the login.
+      pwDone = 'Saved. Signing you out.'
+      setTimeout(() => onsignedout(`Password changed. Sign in as "${r.username}" with the new one.`), 900)
+    } catch (e: any) {
+      pwError = e.status === 401 ? 'That current password is wrong.' : e.message
+    } finally {
+      pwBusy = false
+    }
+  }
+
   let envToken = $state(false)
   let error = $state('')
   let tokenName = $state('')
@@ -92,6 +146,7 @@
     try {
       const [st, g, tk] = await Promise.all([api.status(), api.settings(), api.tokens()])
       loadAlerts()
+      loadAuth()
       status = st
       settings = g
       tokens = tk.tokens
@@ -164,6 +219,65 @@
     <MetricStat label="Database" value={fmtBytes(status.db_bytes)} />
     <MetricStat label="Uptime" value={fmtUptime(status.uptime_seconds)} />
   </div>
+
+  {#if auth?.auth_required}
+    <section class="card">
+      <div class="card-title">Account</div>
+      <div class="setting">
+        <div class="text">
+          <div class="label">Signed in as {auth.username}</div>
+          <div class="hint">
+            {#if auth.source === 'env'}
+              The credential comes from <code>GLANCE_ADMIN_USER</code> and <code>GLANCE_ADMIN_PASSWORD</code>.
+              Change it there: the environment is read on every start, so it would overwrite anything set here.
+            {:else if auth.source === 'generated'}
+              <span class="warn">Still using the password Glance generated on first start.</span>
+              Set one you chose — the generated one only exists in the log line that printed it.
+            {:else}
+              One administrator account guards every dashboard and admin endpoint.
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      {#if auth.can_change}
+        <form
+          class="pw"
+          onsubmit={(e) => {
+            e.preventDefault()
+            submitPassword()
+          }}
+        >
+          <div class="pw-field">
+            <label for="pw-user">Username</label>
+            <Input id="pw-user" bind:value={pwUser} autocomplete="username" placeholder={auth.username} />
+          </div>
+          <PasswordInput bind:value={pwCurrent} label="Current password" autocomplete="current-password" disabled={pwBusy} />
+          <PasswordInput
+            bind:value={pwNext}
+            label="New password"
+            autocomplete="new-password"
+            hint="At least {minPassword} characters. Stored as a PBKDF2 derivation, never in the clear."
+            disabled={pwBusy}
+          />
+          <PasswordInput bind:value={pwConfirm} label="New password again" autocomplete="new-password" disabled={pwBusy} />
+          <!-- Only nags once there is something to nag about: an untouched form
+               shows no red, and the button says why it is disabled instead. -->
+          {#if pwError}
+            <p class="bad" role="alert">{pwError}</p>
+          {:else if pwDone}
+            <p class="hint ok" role="status">{pwDone}</p>
+          {:else if pwProblem && (pwCurrent || pwNext || pwConfirm)}
+            <p class="hint">{pwProblem}</p>
+          {/if}
+          <div>
+            <Button type="submit" disabled={pwBusy || !!pwProblem}>{pwBusy ? 'Saving' : 'Change password'}</Button>
+          </div>
+          <p class="hint">Changing it signs out every session, including this one.</p>
+        </form>
+      {/if}
+    </section>
+  {/if}
 
   <section class="card">
     <div class="card-title">Appearance</div>
@@ -399,5 +513,9 @@
   .alert-add .thresh { width: 130px; }
   .alert-add .dest { flex: 1; min-width: 220px; }
   .hint.ok { color: var(--up-operational-strong); }
+  .warn { color: var(--up-degraded-strong); }
+  .pw { display: flex; flex-direction: column; gap: var(--up-space-3); max-width: 340px; padding-top: var(--up-space-4); }
+  .pw-field { display: flex; flex-direction: column; gap: 6px; }
+  .pw-field label { font: var(--up-type-ui); color: var(--up-text-secondary); }
   .bad { color: var(--up-critical-strong, #d64545); }
 </style>

@@ -14,20 +14,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ViralOne/glance/server/internal/alerts"
 	"github.com/ViralOne/glance/server/internal/api"
 	"github.com/ViralOne/glance/server/internal/auth"
 	"github.com/ViralOne/glance/server/internal/config"
 	"github.com/ViralOne/glance/server/internal/database"
 	"github.com/ViralOne/glance/server/internal/events"
 	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/funnels"
 	"github.com/ViralOne/glance/server/internal/geo"
+	"github.com/ViralOne/glance/server/internal/goals"
 	"github.com/ViralOne/glance/server/internal/ids"
+	"github.com/ViralOne/glance/server/internal/importer"
+	"github.com/ViralOne/glance/server/internal/mailer"
+	"github.com/ViralOne/glance/server/internal/notes"
 	"github.com/ViralOne/glance/server/internal/polar"
 	"github.com/ViralOne/glance/server/internal/ratelimit"
 	"github.com/ViralOne/glance/server/internal/revenue"
 	"github.com/ViralOne/glance/server/internal/rollup"
 	"github.com/ViralOne/glance/server/internal/searchconsole"
 	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/shares"
 	"github.com/ViralOne/glance/server/internal/sites"
 	"github.com/ViralOne/glance/server/internal/stats"
 	"github.com/ViralOne/glance/server/internal/stripe"
@@ -95,8 +102,22 @@ func run() error {
 	geoDB := geo.Open(cfg.GeoIPPath, log)
 	defer geoDB.Close()
 
+	mail := mailer.New(mailer.Config{
+		Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser,
+		Password: cfg.SMTPPassword, From: cfg.SMTPFrom, TLS: cfg.SMTPTLS,
+	}, log)
+	if mail.Configured() {
+		log.Info("email.enabled", "host", cfg.SMTPHost, "from", cfg.SMTPFrom)
+	}
+	statsStore := stats.New(db)
+	alertStore := alerts.New(db)
+	engine := &alerts.Engine{
+		Store: alertStore, Sites: siteStore, Stats: statsStore, Revenue: revStore,
+		Notifier: alerts.NewNotifier(mail, log), BaseURL: cfg.BaseURL,
+	}
+
 	srv := &api.Server{
-		DB: db, Log: log, Sites: siteStore, Settings: st, Writer: writer, Stats: stats.New(db),
+		DB: db, Log: log, Sites: siteStore, Settings: st, Writer: writer, Stats: statsStore,
 		Favicons: fetcher, Admin: admin, Web: web.Handler(), TrustProxy: true, MCPToken: cfg.MCPToken,
 		TrustedProxyHops: cfg.TrustedProxyHops, AllowLocalEvents: cfg.AllowLocalEvents,
 		CollectLimiter: ratelimit.New(cfg.CollectPerSecond, cfg.CollectBurst),
@@ -105,11 +126,14 @@ func run() error {
 		Tokens:         tokens.New(db), RetentionDays: cfg.RetentionDays, RetentionFromEnv: cfg.RetentionDaysSet,
 		StartedAt: time.Now(), DatabasePath: cfg.DatabasePath, Google: google,
 		Revenue: revStore, Polar: polarSvc, Stripe: stripeSvc,
+		Goals: goals.New(db), Funnels: funnels.New(db), Notes: notes.New(db), Shares: shares.New(db),
+		Alerts: alertStore, AlertEngine: engine, Mail: mail, Importer: importer.New(db),
 	}
 
 	go maintenance(ctx, log, db, siteStore, st, fetcher, cfg)
 	go searchConsoleSync(ctx, google)
 	go paymentSync(ctx, polarSvc, stripeSvc)
+	go alertLoop(ctx, engine)
 
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
@@ -203,6 +227,25 @@ const (
 	loginPerSecond = 0.2 // one attempt every five seconds, sustained
 	loginBurst     = 10
 )
+
+// alertLoop evaluates alert rules every five minutes.
+//
+// Five minutes is a compromise: fast enough that a spike alert is still news,
+// slow enough that a rule with a one-hour window is not re-evaluated on
+// essentially the same data twelve times an hour. Each rule's own cooldown
+// stops it firing repeatedly while a condition persists.
+func alertLoop(ctx context.Context, engine *alerts.Engine) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			engine.Run(ctx)
+		}
+	}
+}
 
 // paymentSync reconciles orders for every connected site once a day, so
 // refunds and missed webhooks are picked up whichever processor they came

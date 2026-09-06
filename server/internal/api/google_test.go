@@ -81,7 +81,7 @@ func TestGoogleSearchConsole(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"redirect_uri":"http://example.com/api/v1/google/callback"`) {
 		t.Fatalf("redirect uri: %s", rr.Body)
 	}
-	if rr := do(t, h, "GET", "/api/v1/sites/"+site.ID+"/google/connect", nil, nil); rr.Code != 401 {
+	if rr := do(t, h, "POST", "/api/v1/sites/"+site.ID+"/google/connect", nil, nil); rr.Code != 401 {
 		t.Fatalf("connect must need login: %d", rr.Code)
 	}
 
@@ -93,12 +93,12 @@ func TestGoogleSearchConsole(t *testing.T) {
 	if rr := do(t, h, "GET", "/api/v1/sites/"+site.ID+"/google", nil, tokenHdr); rr.Code != 200 {
 		t.Fatalf("token status: %d", rr.Code)
 	}
-	if rr := do(t, h, "GET", "/api/v1/sites/"+site.ID+"/google/connect", nil, tokenHdr); rr.Code != 403 {
+	if rr := do(t, h, "POST", "/api/v1/sites/"+site.ID+"/google/connect", nil, tokenHdr); rr.Code != 403 {
 		t.Fatalf("token must not connect: %d %s", rr.Code, rr.Body)
 	}
 
 	// Connect sends the browser to Google with a one-shot state.
-	rr = admin("GET", "/api/v1/sites/"+site.ID+"/google/connect", nil)
+	rr = admin("POST", "/api/v1/sites/"+site.ID+"/google/connect", nil)
 	if rr.Code != 302 {
 		t.Fatalf("connect: %d %s", rr.Code, rr.Body)
 	}
@@ -130,7 +130,7 @@ func TestGoogleSearchConsole(t *testing.T) {
 	}
 
 	// Fresh state, good code: connected, property matched to the domain.
-	rr = admin("GET", "/api/v1/sites/"+site.ID+"/google/connect", nil)
+	rr = admin("POST", "/api/v1/sites/"+site.ID+"/google/connect", nil)
 	consent, _ = url.Parse(rr.Header().Get("Location"))
 	rr = do(t, h, "GET", "/api/v1/google/callback?state="+consent.Query().Get("state")+"&code=good-code", nil, nil)
 	if rr.Code != 302 || rr.Header().Get("Location") != "/s/"+site.ID+"?google=connected" {
@@ -188,7 +188,7 @@ func TestGoogleUnconfigured(t *testing.T) {
 	if rr := do(t, h, "GET", "/api/v1/sites/"+site.ID+"/google", nil, nil); !strings.Contains(rr.Body.String(), `"configured":false`) {
 		t.Fatalf("status: %s", rr.Body)
 	}
-	if rr := do(t, h, "GET", "/api/v1/sites/"+site.ID+"/google/connect", nil, nil); rr.Code != 409 {
+	if rr := do(t, h, "POST", "/api/v1/sites/"+site.ID+"/google/connect", nil, nil); rr.Code != 409 {
 		t.Fatalf("connect without client: %d %s", rr.Code, rr.Body)
 	}
 }

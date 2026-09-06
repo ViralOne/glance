@@ -26,6 +26,9 @@ type Row struct {
 	Key       string `json:"key"`
 	Pageviews int    `json:"pageviews"`
 	Visitors  int    `json:"visitors"`
+	// Value is the summed worth of the events behind this row, in minor
+	// units. Zero for every dimension except events and their properties.
+	Value int `json:"value,omitempty"`
 }
 
 // Totals for a window.
@@ -251,7 +254,7 @@ func (s *Store) series(ctx context.Context, siteID string, from, to time.Time, b
 
 // breakdown sums a dimension over whole days covering [from, to).
 func (s *Store) breakdown(ctx context.Context, siteID, dim string, from, to time.Time, top int) ([]Row, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key, SUM(pageviews), SUM(visitors) FROM daily_stats
+	rows, err := s.db.QueryContext(ctx, `SELECT key, SUM(pageviews), SUM(visitors), SUM(value) FROM daily_stats
 		WHERE site_id = ? AND dim = ? AND day >= ? AND day <= ? GROUP BY key ORDER BY SUM(pageviews) DESC, key ASC LIMIT ?`,
 		siteID, dim, from.Format("2006-01-02"), to.Add(-time.Second).Format("2006-01-02"), top)
 	if err != nil {
@@ -261,12 +264,32 @@ func (s *Store) breakdown(ctx context.Context, siteID, dim string, from, to time
 	out := []Row{}
 	for rows.Next() {
 		var r Row
-		if err := rows.Scan(&r.Key, &r.Pageviews, &r.Visitors); err != nil {
+		if err := rows.Scan(&r.Key, &r.Pageviews, &r.Visitors, &r.Value); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// TotalsBetween sums pageviews and visitors over an arbitrary window, using
+// hourly rollups when the window is short enough for them to be exact and
+// daily ones otherwise. Alerts need a window that is not one of the
+// dashboard's ranges, which is why this is separate from Summary.
+func (s *Store) TotalsBetween(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
+	var t Totals
+	// Below a few days the hourly table is both finer and small; above it the
+	// daily table is one row per day instead of twenty-four.
+	if to.Sub(from) <= 7*24*time.Hour {
+		err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0) FROM hourly_stats
+			WHERE site_id = ? AND hour >= ? AND hour < ?`,
+			siteID, from.UTC().Format("2006-01-02T15"), to.UTC().Format("2006-01-02T15")).Scan(&t.Pageviews, &t.Visitors)
+		return t, err
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0) FROM daily_stats
+		WHERE site_id = ? AND dim = 'total' AND day >= ? AND day < ?`,
+		siteID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")).Scan(&t.Pageviews, &t.Visitors)
+	return t, err
 }
 
 // Breakdown returns every key for one dimension over a range, best first.
@@ -276,7 +299,14 @@ func (s *Store) Breakdown(ctx context.Context, siteID, dim, rng string, now time
 }
 
 // Dims are the breakdown dimensions the dashboard can ask for.
-var Dims = []string{"page", "ref", "country", "region", "device", "browser", "os", "event", "utm_source", "utm_campaign"}
+//
+// "prop" keys are the JSON property bag of a custom event, "bot" is a crawler
+// by name and "aibot" is the subset that feeds a language model. Crawlers are
+// never part of a visitor count, so their rows carry pageviews only.
+var Dims = []string{
+	"page", "ref", "country", "region", "city", "device", "browser", "os",
+	"event", "prop", "utm_source", "utm_campaign", "utm_medium", "bot", "aibot",
+}
 
 // ValidDim reports whether dim is a stored breakdown dimension.
 func ValidDim(dim string) bool {

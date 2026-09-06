@@ -20,18 +20,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ViralOne/glance/server/internal/alerts"
 	"github.com/ViralOne/glance/server/internal/auth"
 	"github.com/ViralOne/glance/server/internal/enrich"
 	"github.com/ViralOne/glance/server/internal/events"
 	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/funnels"
 	"github.com/ViralOne/glance/server/internal/geo"
+	"github.com/ViralOne/glance/server/internal/goals"
+	"github.com/ViralOne/glance/server/internal/importer"
+	"github.com/ViralOne/glance/server/internal/mailer"
 	"github.com/ViralOne/glance/server/internal/mcp"
+	"github.com/ViralOne/glance/server/internal/notes"
 	"github.com/ViralOne/glance/server/internal/polar"
 	"github.com/ViralOne/glance/server/internal/ratelimit"
 	"github.com/ViralOne/glance/server/internal/revenue"
 	"github.com/ViralOne/glance/server/internal/rollup"
 	"github.com/ViralOne/glance/server/internal/searchconsole"
 	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/shares"
 	"github.com/ViralOne/glance/server/internal/sites"
 	"github.com/ViralOne/glance/server/internal/stats"
 	"github.com/ViralOne/glance/server/internal/stripe"
@@ -88,6 +95,16 @@ type Server struct {
 	Revenue *revenue.Store
 	Polar   *polar.Service
 	Stripe  *stripe.Service
+	// Goals, funnels, notes, shares and alerts are the reporting features
+	// layered on top of the rollups.
+	Goals       *goals.Store
+	Funnels     *funnels.Store
+	Notes       *notes.Store
+	Shares      *shares.Store
+	Alerts      *alerts.Store
+	AlertEngine *alerts.Engine
+	Mail        *mailer.Mailer
+	Importer    *importer.Importer
 	// Retention defaults and whether the environment pins them.
 	RetentionDays    int
 	RetentionFromEnv bool
@@ -152,6 +169,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/theme", s.theme)
 	mux.HandleFunc("POST /api/v1/collect", s.collect)
 	mux.HandleFunc("OPTIONS /api/v1/collect", s.collectOptions)
+	// A shared dashboard is read-only and addressed by an unguessable slug,
+	// which is the only credential it has.
+	mux.HandleFunc("GET /api/v1/shared/{slug}", s.sharedStats)
+	mux.HandleFunc("GET /api/v1/shared/{slug}/meta", s.sharedMeta)
 
 	// Admin session.
 	mux.HandleFunc("GET /api/v1/auth/me", s.authMe)
@@ -171,7 +192,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/refresh-favicon", s.adminAuth(s.refreshFavicon))
 	mux.Handle("GET /api/v1/sites/{id}/favicon", s.adminAuth(s.siteFavicon))
 	mux.Handle("GET /api/v1/sites/{id}/google", s.adminAuth(s.googleStatus))
-	mux.Handle("GET /api/v1/sites/{id}/google/connect", s.adminAuth(s.googleConnect))
+	mux.Handle("POST /api/v1/sites/{id}/google/connect", s.adminAuth(s.googleConnect))
 	mux.Handle("PATCH /api/v1/sites/{id}/google", s.adminAuth(s.googleSetProperty))
 	mux.Handle("DELETE /api/v1/sites/{id}/google", s.adminAuth(s.googleDisconnect))
 	mux.Handle("POST /api/v1/sites/{id}/google/sync", s.adminAuth(s.googleSync))
@@ -183,6 +204,43 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/payments/{provider}/sync", s.adminAuth(s.paymentsSync))
 	mux.Handle("GET /api/v1/sites/{id}/revenue", s.adminAuth(s.siteRevenue))
 	mux.HandleFunc("POST /api/v1/payments/{provider}/webhook/{id}", s.paymentsWebhook)
+	// Goals: an event or a page that counts as a conversion.
+	mux.Handle("GET /api/v1/sites/{id}/goals", s.adminAuth(s.listGoals))
+	mux.Handle("POST /api/v1/sites/{id}/goals", s.adminAuth(s.createGoal))
+	mux.Handle("PATCH /api/v1/sites/{id}/goals/{goal}", s.adminAuth(s.updateGoal))
+	mux.Handle("DELETE /api/v1/sites/{id}/goals/{goal}", s.adminAuth(s.deleteGoal))
+
+	// Funnels: ordered steps, measured from raw events within a day.
+	mux.Handle("GET /api/v1/sites/{id}/funnels", s.adminAuth(s.listFunnels))
+	mux.Handle("POST /api/v1/sites/{id}/funnels", s.adminAuth(s.createFunnel))
+	mux.Handle("PATCH /api/v1/sites/{id}/funnels/{funnel}", s.adminAuth(s.updateFunnel))
+	mux.Handle("DELETE /api/v1/sites/{id}/funnels/{funnel}", s.adminAuth(s.deleteFunnel))
+
+	// Notes: chart annotations.
+	mux.Handle("GET /api/v1/sites/{id}/notes", s.adminAuth(s.listNotes))
+	mux.Handle("POST /api/v1/sites/{id}/notes", s.adminAuth(s.createNote))
+	mux.Handle("PATCH /api/v1/sites/{id}/notes/{note}", s.adminAuth(s.updateNote))
+	mux.Handle("DELETE /api/v1/sites/{id}/notes/{note}", s.adminAuth(s.deleteNote))
+
+	// Core Web Vitals.
+	mux.Handle("GET /api/v1/sites/{id}/vitals", s.adminAuth(s.siteVitals))
+
+	// Shared read-only dashboards.
+	mux.Handle("GET /api/v1/sites/{id}/shares", s.adminAuth(s.listShares))
+	mux.Handle("POST /api/v1/sites/{id}/shares", s.adminAuth(s.createShare))
+	mux.Handle("PATCH /api/v1/sites/{id}/shares/{slug}", s.adminAuth(s.updateShare))
+	mux.Handle("DELETE /api/v1/sites/{id}/shares/{slug}", s.adminAuth(s.deleteShare))
+
+	// Import history from another tool.
+	mux.Handle("POST /api/v1/sites/{id}/import", s.adminAuth(s.importData))
+
+	// Alerts and the weekly digest.
+	mux.Handle("GET /api/v1/alerts", s.adminAuth(s.listAlerts))
+	mux.Handle("POST /api/v1/alerts", s.adminAuth(s.createAlert))
+	mux.Handle("PATCH /api/v1/alerts/{id}", s.adminAuth(s.updateAlert))
+	mux.Handle("DELETE /api/v1/alerts/{id}", s.adminAuth(s.deleteAlert))
+	mux.Handle("POST /api/v1/alerts/{id}/test", s.adminAuth(s.testAlert))
+
 	mux.Handle("GET /api/v1/favicon", s.adminAuth(s.refFavicon))
 	mux.Handle("GET /api/v1/status", s.adminAuth(s.status))
 	mux.Handle("GET /api/v1/settings", s.adminAuth(s.getSettings))
@@ -959,20 +1017,49 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
+// notFoundErrors and invalidErrors are the sentinels every store returns, so
+// a new feature's validation failure comes back as 422 rather than as an
+// opaque 500. A store added without being listed here is a bug the tests catch.
+var notFoundErrors = []error{
+	sites.ErrNotFound, tokens.ErrNotFound, searchconsole.ErrNotConnected, revenue.ErrNotConnected,
+	goals.ErrNotFound, funnels.ErrNotFound, notes.ErrNotFound, shares.ErrNotFound, alerts.ErrNotFound,
+}
+
+var invalidErrors = []error{
+	sites.ErrInvalid, tokens.ErrInvalid, settings.ErrInvalid, revenue.ErrInvalid,
+	goals.ErrInvalid, funnels.ErrInvalid, notes.ErrInvalid, shares.ErrInvalid, alerts.ErrInvalid,
+	importer.ErrInvalid, importer.ErrUnsupported,
+}
+
+func anyIs(err error, list []error) bool {
+	for _, target := range list {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, sites.ErrNotFound), errors.Is(err, tokens.ErrNotFound), errors.Is(err, searchconsole.ErrNotConnected), errors.Is(err, polar.ErrNotConnected):
+	case anyIs(err, notFoundErrors):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
-	case errors.Is(err, polar.ErrInvalid):
+	case anyIs(err, invalidErrors):
 		writeError(w, http.StatusUnprocessableEntity, "invalid", err.Error())
-	case strings.HasPrefix(err.Error(), "polar returned"):
-		writeError(w, http.StatusBadGateway, "polar", err.Error())
+	case errors.Is(err, shares.ErrPassword):
+		writeError(w, http.StatusUnauthorized, "password_required", err.Error())
+	case errors.Is(err, mailer.ErrNotConfigured):
+		writeError(w, http.StatusUnprocessableEntity, "email_not_configured", err.Error())
 	case errors.Is(err, searchconsole.ErrReconnect):
 		writeError(w, http.StatusConflict, "reconnect", err.Error())
+	// A provider's own error text is passed through as a bad gateway: the
+	// request was fine, the upstream was not.
+	case strings.HasPrefix(err.Error(), "polar returned"):
+		writeError(w, http.StatusBadGateway, "polar", err.Error())
+	case strings.HasPrefix(err.Error(), "stripe returned"):
+		writeError(w, http.StatusBadGateway, "stripe", err.Error())
 	case strings.HasPrefix(err.Error(), "google returned"):
 		writeError(w, http.StatusBadGateway, "google", err.Error())
-	case errors.Is(err, sites.ErrInvalid), errors.Is(err, tokens.ErrInvalid), errors.Is(err, settings.ErrInvalid):
-		writeError(w, http.StatusUnprocessableEntity, "invalid", err.Error())
 	default:
 		s.Log.Error("http.error", "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "internal", "something went wrong")

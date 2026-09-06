@@ -12,15 +12,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ViralOne/glance/server/internal/alerts"
 	"github.com/ViralOne/glance/server/internal/auth"
 	"github.com/ViralOne/glance/server/internal/database"
 	"github.com/ViralOne/glance/server/internal/events"
 	"github.com/ViralOne/glance/server/internal/favicons"
+	"github.com/ViralOne/glance/server/internal/funnels"
+	"github.com/ViralOne/glance/server/internal/goals"
+	"github.com/ViralOne/glance/server/internal/importer"
+	"github.com/ViralOne/glance/server/internal/mailer"
+	"github.com/ViralOne/glance/server/internal/notes"
 	"github.com/ViralOne/glance/server/internal/polar"
 	"github.com/ViralOne/glance/server/internal/revenue"
 	"github.com/ViralOne/glance/server/internal/rollup"
 	"github.com/ViralOne/glance/server/internal/searchconsole"
 	"github.com/ViralOne/glance/server/internal/settings"
+	"github.com/ViralOne/glance/server/internal/shares"
 	"github.com/ViralOne/glance/server/internal/sites"
 	"github.com/ViralOne/glance/server/internal/stats"
 	"github.com/ViralOne/glance/server/internal/stripe"
@@ -36,14 +43,24 @@ func newServer(t *testing.T, user, pass string) *Server {
 	t.Cleanup(func() { db.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	revStore := revenue.NewStore(db)
+	statsStore := stats.New(db)
+	siteStore := sites.New(db)
+	alertStore := alerts.New(db)
+	mail := mailer.New(mailer.Config{}, log)
+	engine := &alerts.Engine{
+		Store: alertStore, Sites: siteStore, Stats: statsStore, Revenue: revStore,
+		Notifier: alerts.NewNotifier(mail, log),
+	}
 	return &Server{
-		DB: db, Log: log, Sites: sites.New(db), Settings: settings.New(db), Writer: events.NewWriter(db, log),
-		Stats: stats.New(db), Favicons: favicons.New(db), Admin: auth.NewAdmin(user, pass, auth.NewSessionStore(db)),
+		DB: db, Log: log, Sites: siteStore, Settings: settings.New(db), Writer: events.NewWriter(db, log),
+		Stats: statsStore, Favicons: favicons.New(db), Admin: auth.NewAdmin(user, pass, auth.NewSessionStore(db)),
 		Tokens: tokens.New(db), RetentionDays: 7, TrustedProxyHops: 1,
 		Google:  searchconsole.NewService(searchconsole.NewStore(db), searchconsole.NewClient("", ""), log),
 		Revenue: revStore,
 		Polar:   polar.NewService(revStore, polar.NewClient(), log),
 		Stripe:  stripe.NewService(revStore, stripe.NewClient(), log),
+		Goals:   goals.New(db), Funnels: funnels.New(db), Notes: notes.New(db), Shares: shares.New(db),
+		Alerts: alertStore, AlertEngine: engine, Mail: mail, Importer: importer.New(db),
 	}
 }
 

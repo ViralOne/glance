@@ -113,9 +113,8 @@ func (s *Store) Delete(ctx context.Context, siteID, id string) error {
 	return nil
 }
 
-// Between returns a site's notes for the UTC days in [fromDay, toDay).
 func (s *Store) Between(ctx context.Context, siteID, fromDay, toDay string) ([]Note, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+cols+` FROM notes WHERE site_id = ? AND day >= ? AND day < ? ORDER BY day, created_at`,
+	rows, err := s.db.QueryContext(ctx, `SELECT `+cols+` FROM notes WHERE site_id = ? AND day >= ? AND day <= ? ORDER BY day, created_at`,
 		siteID, fromDay, toDay)
 	if err != nil {
 		return nil, err

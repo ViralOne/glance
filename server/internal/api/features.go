@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -198,8 +199,8 @@ func (s *Server) listNotes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	from, to, _ := stats.Window(rng, s.Now())
-	list, err := s.Notes.Between(r.Context(), st.ID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02"))
+	fromDay, toDay := stats.DayRange(rng, s.Now())
+	list, err := s.Notes.Between(r.Context(), st.ID, fromDay, toDay)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -403,8 +404,8 @@ func (s *Server) sharedStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	live, _ := s.Stats.LiveVisitors(r.Context(), st.ID, s.Now())
-	from, to, _ := stats.Window(rng, s.Now())
-	noteList, err := s.Notes.Between(r.Context(), st.ID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02"))
+	fromDay, toDay := stats.DayRange(rng, s.Now())
+	noteList, err := s.Notes.Between(r.Context(), st.ID, fromDay, toDay)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -564,7 +565,16 @@ func (s *Server) importData(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxImportBytes))
 	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "too_large", "the upload is too large")
+		// Only a size overrun is the operator's problem to fix; a dropped
+		// connection told as "too large" sends them looking for a limit that
+		// was never reached.
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large",
+				fmt.Sprintf("the upload is larger than %d MB", maxImportBytes>>20))
+			return
+		}
+		writeError(w, http.StatusBadRequest, "upload_failed", "the upload did not complete: "+err.Error())
 		return
 	}
 	if len(body) == 0 {

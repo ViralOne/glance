@@ -268,17 +268,47 @@ func (s *Store) Create(ctx context.Context, in Input) (Site, error) {
 			return Site{}, err
 		}
 	}
+	if in.ExcludePaths != nil {
+		if site.ExcludePaths, err = validPatterns(*in.ExcludePaths); err != nil {
+			return Site{}, err
+		}
+	}
+	if in.ExcludeIPs != nil {
+		if site.ExcludeIPs, err = validIPs(*in.ExcludeIPs); err != nil {
+			return Site{}, err
+		}
+	}
+	if in.Domains != nil {
+		if site.Domains, err = validDomains(*in.Domains, site.Domain); err != nil {
+			return Site{}, err
+		}
+	}
 	now := ids.Now()
 	site.CreatedAt, site.UpdatedAt = now, now
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) + 1 FROM sites`).Scan(&site.Position); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return Site{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO sites (id, name, domain, home_country, accent, default_range, position, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-		site.ID, site.Name, site.Domain, site.HomeCountry, site.Accent, site.DefaultRange, site.Position, site.CreatedAt, site.UpdatedAt)
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) + 1 FROM sites`).Scan(&site.Position); err != nil {
+		return Site{}, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO sites (id, name, domain, home_country, accent, default_range, exclude_paths, exclude_ips, position, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		site.ID, site.Name, site.Domain, site.HomeCountry, site.Accent, site.DefaultRange,
+		joinLines(site.ExcludePaths), joinLines(site.ExcludeIPs), site.Position, site.CreatedAt, site.UpdatedAt)
 	if database.IsUniqueViolation(err) {
 		return Site{}, fmt.Errorf("%w: %s is already tracked", ErrInvalid, d)
 	}
 	if err != nil {
+		return Site{}, err
+	}
+	for _, extra := range site.Domains {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO site_domains (site_id, domain) VALUES (?, ?)`, site.ID, extra); err != nil {
+			return Site{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return Site{}, err
 	}
 	s.invalidate()

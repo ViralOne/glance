@@ -278,9 +278,15 @@ func (s *Store) Measure(ctx context.Context, f Funnel, rng string, now time.Time
 
 	for i, st := range f.Steps {
 		where, args := stepPredicate(st)
-		q := `SELECT substr(ts, 1, 10), visitor, MIN(ts) FROM events
+		// Every matching timestamp is read, not just the earliest per visitor.
+		// Taking MIN(ts) and then testing it against the previous step drops
+		// anyone who did this step once before the previous step and again
+		// after it: land on /pricing, go to /, come back to /pricing, and the
+		// funnel would say you never reached step two. What matters is the
+		// earliest occurrence *at or after* the previous step.
+		q := `SELECT substr(ts, 1, 10), visitor, ts FROM events
 			WHERE site_id = ? AND ts >= ? AND ts < ? AND visitor != '' AND ` + where + `
-			GROUP BY 1, 2`
+			ORDER BY ts`
 		qargs := append([]any{f.SiteID, fromTS, toTS}, args...)
 		rows, err := s.db.QueryContext(ctx, q, qargs...)
 		if err != nil {
@@ -294,11 +300,15 @@ func (s *Store) Measure(ctx context.Context, f Funnel, rng string, now time.Time
 				return out, err
 			}
 			k := key{day, visitor}
+			// Rows arrive in time order, so the first one accepted for a
+			// visitor-day is already the earliest qualifying occurrence.
+			if _, done := next[k]; done {
+				continue
+			}
 			if i == 0 {
 				next[k] = at
 				continue
 			}
-			// Only counts if the previous step happened first.
 			if prev, ok := reached[k]; ok && prev <= at {
 				next[k] = at
 			}

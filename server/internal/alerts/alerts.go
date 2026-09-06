@@ -185,6 +185,11 @@ func validate(in Input, a *Alert) error {
 	if a.Kind == KindThreshold && a.Threshold <= 0 {
 		return fmt.Errorf("%w: a threshold rule needs a threshold above zero", ErrInvalid)
 	}
+	if a.Kind == KindDigest {
+		if a.Threshold != float64(int(a.Threshold)) || a.Threshold < 0 || a.Threshold > 23 {
+			return fmt.Errorf("%w: for a digest, threshold is the UTC hour to send at, 0 to 23", ErrInvalid)
+		}
+	}
 	return nil
 }
 
@@ -200,6 +205,9 @@ func contains(list []string, v string) bool {
 // Create inserts an alert.
 func (s *Store) Create(ctx context.Context, in Input) (Alert, error) {
 	a := Alert{ID: ids.New("alrt"), Kind: KindSpike, Metric: MetricVisitors, Window: "24h", Enabled: true, CooldownMin: 60, CreatedAt: ids.Now()}
+	if in.Kind != nil && strings.ToLower(strings.TrimSpace(*in.Kind)) == KindDigest && in.Threshold == nil {
+		a.Threshold = 8
+	}
 	if err := validate(in, &a); err != nil {
 		return Alert{}, err
 	}

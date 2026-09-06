@@ -93,6 +93,10 @@ func Window(rng string, now time.Time) (from, to time.Time, bucket string) {
 		return to.AddDate(0, 0, -30), to, "day"
 	}
 }
+func DayRange(rng string, now time.Time) (fromDay, toDay string) {
+	from, to, _ := Window(rng, now)
+	return from.UTC().Format("2006-01-02"), to.Add(-time.Second).UTC().Format("2006-01-02")
+}
 
 // ValidRange reports whether r is supported.
 func ValidRange(r string) bool {
@@ -308,45 +312,56 @@ func (s *Store) breakdown(ctx context.Context, siteID, dim string, from, to time
 func (s *Store) totals(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
 	var out Totals
 	from, to = from.UTC(), to.UTC()
-	for day := from.Truncate(24 * time.Hour); day.Before(to); day = day.AddDate(0, 0, 1) {
-		next := day.AddDate(0, 0, 1)
-		whole := !day.Before(from) && !next.After(to)
-		var t Totals
-		var err error
-		if whole {
-			t, err = s.dayTotals(ctx, siteID, day)
-		} else {
-			lo, hi := day, next
-			if lo.Before(from) {
-				lo = from
-			}
-			if hi.After(to) {
-				hi = to
-			}
-			t, err = s.hourTotals(ctx, siteID, lo, hi)
-		}
+	if !to.After(from) {
+		return out, nil
+	}
+	// Whole days come from one grouped query over daily_stats, and the at most
+	// two partial days at the window's edges from one hourly query each. A
+	// per-day round trip was correct but cost ~360 queries for a 180d load,
+	// twice over, before the fifteen breakdowns even ran.
+	firstWhole := from
+	if !firstWhole.Equal(from.Truncate(24 * time.Hour)) {
+		firstWhole = from.Truncate(24*time.Hour).AddDate(0, 0, 1)
+	}
+	lastWholeEnd := to.Truncate(24 * time.Hour)
+	if lastWholeEnd.Before(firstWhole) {
+		// The window sits inside a single day, so there are no whole days and
+		// the hourly rows cover all of it.
+		return s.hourTotals(ctx, siteID, from, to)
+	}
+	if firstWhole.After(from) {
+		lead, err := s.hourTotals(ctx, siteID, from, firstWhole)
 		if err != nil {
 			return out, err
 		}
-		out.Pageviews += t.Pageviews
-		out.Visitors += t.Visitors
+		out.Pageviews += lead.Pageviews
+		out.Visitors += lead.Visitors
 	}
-	return out, nil
-}
-
-func (s *Store) dayTotals(ctx context.Context, siteID string, day time.Time) (Totals, error) {
-	var t Totals
+	if to.After(lastWholeEnd) {
+		tail, err := s.hourTotals(ctx, siteID, lastWholeEnd, to)
+		if err != nil {
+			return out, err
+		}
+		out.Pageviews += tail.Pageviews
+		out.Visitors += tail.Visitors
+	}
+	var whole Totals
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0)
-		FROM daily_stats WHERE site_id = ? AND dim = 'total' AND day = ?`,
-		siteID, day.Format("2006-01-02")).Scan(&t.Pageviews, &t.Visitors)
-	return t, err
+		FROM daily_stats WHERE site_id = ? AND dim = 'total' AND day >= ? AND day < ?`,
+		siteID, firstWhole.Format("2006-01-02"), lastWholeEnd.Format("2006-01-02")).Scan(&whole.Pageviews, &whole.Visitors)
+	if err != nil {
+		return out, err
+	}
+	out.Pageviews += whole.Pageviews
+	out.Visitors += whole.Visitors
+	return out, nil
 }
 
 func (s *Store) hourTotals(ctx context.Context, siteID string, from, to time.Time) (Totals, error) {
 	var t Totals
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(pageviews), 0), COALESCE(SUM(visitors), 0)
 		FROM hourly_stats WHERE site_id = ? AND hour >= ? AND hour < ?`,
-		siteID, from.Format("2006-01-02T15"), to.Format("2006-01-02T15")).Scan(&t.Pageviews, &t.Visitors)
+		siteID, from.UTC().Format("2006-01-02T15"), to.UTC().Format("2006-01-02T15")).Scan(&t.Pageviews, &t.Visitors)
 	return t, err
 }
 

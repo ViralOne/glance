@@ -1,6 +1,6 @@
 <script lang="ts">
   // Per-site dashboard: metrics, chart, breakdowns, world map, settings.
-  import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type GoogleStatus, type Live, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, type Site, type Summary } from '../lib/api'
+  import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type FunnelResult, type GoalResult, type GoogleStatus, type Live, type Note, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, type Site, type Summary, type Vitals } from '../lib/api'
   import { setAccentOverride } from '../lib/accent'
   import { countryName, flag, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
   import { pageIn, panel } from '../lib/motion'
@@ -338,14 +338,77 @@
     bot: 'Crawlers', aibot: 'AI crawlers',
   }
   // Card tabs, as in the reference: one card per group, a dimension per tab.
-  let sourceTab = $state<'ref' | 'utm_source' | 'utm_campaign'>('ref')
-  let locationTab = $state<'country' | 'region'>('country')
+  type SourceTab = 'ref' | 'utm_source' | 'utm_campaign' | 'utm_medium'
+  type LocationTab = 'country' | 'region' | 'city'
+  type EventTab = 'event' | 'prop'
+  let sourceTab = $state<SourceTab>('ref')
+  let locationTab = $state<LocationTab>('country')
   let deviceTab = $state<'browser' | 'os' | 'device'>('browser')
+  let eventTab = $state<EventTab>('event')
+  let crawlerTab = $state<'bot' | 'aibot'>('bot')
+  // Tabs whose dimension only exists once there is data in it: a "Cities" tab
+  // on an instance with no GeoIP database, or "Properties" with no event
+  // properties, would just be an empty list to click on.
+  const sourceTabs = $derived<{ value: SourceTab; label: string }[]>([
+    { value: 'ref', label: 'Referrer' },
+    { value: 'utm_source', label: 'Source' },
+    { value: 'utm_campaign', label: 'Campaign' },
+    ...(stats?.breakdowns.utm_medium?.length ? [{ value: 'utm_medium' as const, label: 'Medium' }] : []),
+  ])
+  const locationTabs = $derived<{ value: LocationTab; label: string }[]>([
+    { value: 'country', label: 'Countries' },
+    { value: 'region', label: 'Regions' },
+    ...(stats?.breakdowns.city?.length ? [{ value: 'city' as const, label: 'Cities' }] : []),
+  ])
+  const eventTabs = $derived<{ value: EventTab; label: string }[]>([
+    { value: 'event', label: 'Events' },
+    ...(stats?.breakdowns.prop?.length ? [{ value: 'prop' as const, label: 'Properties' }] : []),
+  ])
   const rowsFor = (dim: Dim) => toRows(dim, stats?.breakdowns[dim] ?? [])
   const pages = $derived(rowsFor('page'))
   const sources = $derived(rowsFor(sourceTab))
   const locations = $derived(rowsFor(locationTab))
   const devices = $derived(rowsFor(deviceTab))
+  const crawlers = $derived(rowsFor(crawlerTab))
+
+  // Goals, funnels, vitals and notes are loaded alongside the summary rather
+  // than inside it: each is optional, and a site with none should not pay for
+  // the queries.
+  let goalResults = $state<GoalResult[]>([])
+  let funnelResults = $state<FunnelResult[]>([])
+  let vitals = $state<Vitals | null>(null)
+  let notes = $state<Note[]>([])
+  // The bar shows the conversion rate; the count and value go in the tooltip,
+  // because a rate is what a goal is for.
+  const goalRows = $derived<BarRow[]>(
+    goalResults.map((g) => ({
+      key: g.id,
+      label: g.name,
+      value: g.rate,
+      title: `${fmtNum(g.conversions)} of ${fmtNum(goalVisitors)} visitors${g.value ? ` · ${money(g.value)}` : ''}`,
+    })),
+  )
+  let goalVisitors = $state(0)
+  async function loadFeatures() {
+    if (!range) return
+    // A failure in any one of these must not blank the dashboard, so each is
+    // settled independently and falls back to empty.
+    const [g, f, v, n] = await Promise.allSettled([
+      api.goals(id, range),
+      api.funnels(id, range),
+      api.vitals(id, range),
+      api.notes(id, range),
+    ])
+    goalResults = g.status === 'fulfilled' ? g.value.goals : []
+    goalVisitors = g.status === 'fulfilled' ? g.value.visitors : 0
+    funnelResults = f.status === 'fulfilled' ? f.value.funnels : []
+    vitals = v.status === 'fulfilled' ? v.value.vitals : null
+    notes = n.status === 'fulfilled' ? n.value.notes : []
+  }
+  $effect(() => {
+    range
+    loadFeatures()
+  })
   const events = $derived(rowsFor('event'))
 
   // "View all" modal.
@@ -617,11 +680,11 @@
         <BarList
           title="Sources"
           rows={sources}
-          empty={sourceTab === 'ref' ? 'No referrers yet' : sourceTab === 'utm_source' ? 'No utm_source or ?ref= tags seen' : 'No utm_campaign tags seen'}
+          empty={sourceTab === 'ref' ? 'No referrers yet' : sourceTab === 'utm_source' ? 'No utm_source or ?ref= tags seen' : sourceTab === 'utm_medium' ? 'No utm_medium tags seen' : 'No utm_campaign tags seen'}
           onmore={more(sourceTab)}
           onselect={select(sourceTab)}
           selected={selectedKey(sourceTab)}
-          tabs={[{ value: 'ref', label: 'Referrer' }, { value: 'utm_source', label: 'Source' }, { value: 'utm_campaign', label: 'Campaign' }]}
+          tabs={sourceTabs}
           tab={sourceTab}
           ontab={(v) => (sourceTab = v)}
         >
@@ -630,11 +693,11 @@
         <BarList
           title="Locations"
           rows={locations}
-          empty={locationTab === 'country' ? 'No locations yet' : 'No regions yet'}
+          empty={locationTab === 'country' ? 'No locations yet' : locationTab === 'city' ? 'No cities yet. Cities need a GeoIP database; without one, "regions" are time-zone cities.' : 'No regions yet'}
           onmore={more(locationTab)}
           onselect={select(locationTab)}
           selected={selectedKey(locationTab)}
-          tabs={[{ value: 'country', label: 'Countries' }, { value: 'region', label: 'Regions' }]}
+          tabs={locationTabs}
           tab={locationTab}
           ontab={(v) => (locationTab = v)}
         />
@@ -651,7 +714,36 @@
           {#snippet icon(r)}<BrandIcon kind={deviceTab} name={r.key} />{/snippet}
         </BarList>
         {#if events.length > 0}
-          <BarList title="Events" rows={events} onmore={more('event')} onselect={select('event')} selected={selectedKey('event')} />
+          <BarList
+            title="Events"
+            rows={rowsFor(eventTab)}
+            empty={eventTab === 'prop' ? 'No event properties recorded. Pass an object as the second argument to glance().' : 'No events yet'}
+            onmore={more(eventTab)}
+            onselect={select(eventTab)}
+            selected={selectedKey(eventTab)}
+            tabs={eventTabs}
+            tab={eventTab}
+            ontab={(v) => (eventTab = v)}
+          />
+        {/if}
+        {#if goalResults.length > 0}
+          <BarList
+            title="Goals"
+            rows={goalRows}
+            empty="No conversions in this range"
+            format={(v) => `${v.toFixed(1)}%`}
+          />
+        {/if}
+        {#if crawlers.length > 0 && !hasFilters}
+          <BarList
+            title="Crawlers"
+            rows={crawlers}
+            empty={crawlerTab === 'aibot' ? 'No AI crawlers seen in this range' : 'No crawlers seen in this range'}
+            onmore={more(crawlerTab)}
+            tabs={[{ value: 'bot', label: 'All' }, { value: 'aibot', label: 'AI' }]}
+            tab={crawlerTab}
+            ontab={(v) => (crawlerTab = v)}
+          />
         {/if}
       </div>
 

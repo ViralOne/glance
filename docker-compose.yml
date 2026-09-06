@@ -14,3 +14,9 @@ services:
         required: false
     environment:
       GLANCE_DATABASE_PATH: /data/glance.db
+      # This file publishes the port directly, so there is no proxy to trust and
+      # X-Forwarded-For is whatever the caller sent. Put Glance behind a reverse
+      # proxy for real use and set GLANCE_TRUSTED_PROXY_HOPS to the number of
+      # proxies in front of it (usually 1) so visitors are counted per address
+      # rather than all as one.
+      GLANCE_TRUSTED_PROXY_HOPS: "0"

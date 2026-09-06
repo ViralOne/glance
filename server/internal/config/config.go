@@ -27,7 +27,12 @@ type Config struct {
 	// is the nth entry counting from the right. Anything further left was
 	// supplied by the client and must not be trusted: taking the leftmost
 	// entry lets a caller forge a new IP per request and inflate uniques.
-	// Zero means read the peer address and ignore the header entirely.
+	// Zero, the default, means read the peer address and ignore the header
+	// entirely. Zero is the default deliberately: the shipped compose file
+	// publishes the port directly, and trusting one hop when nothing is in
+	// front means the header is whatever the caller sent — which is the hole
+	// this field exists to close. Set it to 1 when Traefik, Caddy, nginx or
+	// Cloudflare terminates in front of Glance.
 	TrustedProxyHops int
 
 	// AllowLocalEvents accepts events whose page host looks like a
@@ -38,7 +43,8 @@ type Config struct {
 	AllowLocalEvents bool
 
 	// CollectBurst and CollectPerSecond cap events accepted from one client
-	// address. Zero disables the limit.
+	// address. A zero in either disables the limit; a burst of zero with a
+	// non-zero rate would otherwise reject everything.
 	CollectBurst     int
 	CollectPerSecond float64
 
@@ -98,7 +104,7 @@ func Load() (Config, error) {
 		AdminPassword: env("GLANCE_ADMIN_PASSWORD", ""),
 		MCPToken:      strings.TrimSpace(env("GLANCE_MCP_TOKEN", "")),
 
-		TrustedProxyHops: 1,
+		TrustedProxyHops: 0,
 		CollectBurst:     120,
 		CollectPerSecond: 4,
 
@@ -186,7 +192,10 @@ func Load() (Config, error) {
 		if *path == "" {
 			continue
 		}
-		if !strings.HasPrefix(*path, "/") || strings.ContainsAny(*path, "?# ") || len(*path) > 200 {
+		// Braces would be read by ServeMux as a wildcard segment and panic at
+		// registration, turning a config typo into a failed start-up instead
+		// of the clean error every other bad value gets.
+		if !strings.HasPrefix(*path, "/") || strings.ContainsAny(*path, "?# {}") || len(*path) > 200 {
 			return c, fmt.Errorf("%s must be an absolute path with no query or fragment, got %q", name, *path)
 		}
 		// Reserving these would let a custom path shadow the dashboard or the

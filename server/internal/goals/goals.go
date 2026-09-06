@@ -216,8 +216,7 @@ func (s *Store) Measure(ctx context.Context, siteID, rng string, now time.Time, 
 		return nil, err
 	}
 	out := make([]Result, 0, len(list))
-	from, to, _ := stats.Window(rng, now)
-	fromDay, toDay := from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")
+	fromDay, toDay := stats.DayRange(rng, now)
 	for _, g := range list {
 		r := Result{Goal: g}
 		dim := "event"
@@ -233,7 +232,7 @@ func (s *Store) Measure(ctx context.Context, siteID, rng string, now time.Time, 
 			args = []any{likePrefix(strings.TrimSuffix(g.Target, "*"))}
 		}
 		q := `SELECT COALESCE(SUM(visitors), 0), COALESCE(SUM(pageviews), 0), COALESCE(SUM(value), 0)
-			FROM daily_stats WHERE site_id = ? AND dim = ? AND day >= ? AND day < ? AND ` + match
+			FROM daily_stats WHERE site_id = ? AND dim = ? AND day >= ? AND day <= ? AND ` + match
 		qargs := append([]any{siteID, dim, fromDay, toDay}, args...)
 		if err := s.db.QueryRowContext(ctx, q, qargs...).Scan(&r.Conversions, &r.Completions, &r.Value); err != nil {
 			return nil, err

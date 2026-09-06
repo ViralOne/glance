@@ -69,6 +69,8 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 			targets = []sites.Site{s}
 		}
+		stopAtFirst := a.Kind != KindDigest
+		delivered, failed := 0, ""
 		for _, site := range targets {
 			note, fired, err := e.evaluate(ctx, a, site, now)
 			if err != nil {
@@ -79,16 +81,21 @@ func (e *Engine) Run(ctx context.Context) {
 				continue
 			}
 			if err := e.Notifier.Deliver(ctx, a, note); err != nil {
-				e.Notifier.Log.Warn("alerts.deliver_failed", "alert", a.ID, "channel", a.Channel, "error", err.Error())
-				_ = e.Store.MarkFired(ctx, a.ID, now, err.Error())
+				e.Notifier.Log.Warn("alerts.deliver_failed", "alert", a.ID, "site", site.ID, "channel", a.Channel, "error", err.Error())
+				failed = err.Error()
 				continue
 			}
 			e.Notifier.Log.Info("alerts.fired", "alert", a.ID, "site", site.ID, "kind", a.Kind)
+			delivered++
+			if stopAtFirst {
+				break
+			}
+		}
+		switch {
+		case delivered > 0:
 			_ = e.Store.MarkFired(ctx, a.ID, now, "")
-			// One notification per evaluation, even for an all-sites rule: a
-			// rule that matches five sites at once should not send five
-			// messages and then be on cooldown anyway.
-			break
+		case failed != "":
+			_ = e.Store.MarkFired(ctx, a.ID, now, failed)
 		}
 	}
 }
@@ -202,18 +209,18 @@ func (e *Engine) siteURL(siteID string) string {
 }
 
 // digestDue reports whether a weekly digest should go out now: Monday, in the
-// hour the rule's threshold names (default 08:00 UTC), and not already sent
-// this week.
+// hour the rule's threshold names, and not already sent this week.
+//
+// The hour is validated when the rule is saved and defaults to 8 there rather
+// than here, because a zero cannot be told apart from "unset" once it reaches
+// this function — which is how an unset digest went out at midnight while the
+// documentation promised 08:00.
 func digestDue(a Alert, now time.Time) bool {
 	now = now.UTC()
 	if now.Weekday() != time.Monday {
 		return false
 	}
-	hour := int(a.Threshold)
-	if hour < 0 || hour > 23 {
-		hour = 8
-	}
-	if now.Hour() != hour {
+	if now.Hour() != int(a.Threshold) {
 		return false
 	}
 	if a.LastFired == "" {

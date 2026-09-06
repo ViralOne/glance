@@ -28,9 +28,10 @@ type Limiter struct {
 	now     func() time.Time
 }
 
-// New returns a Limiter allowing burst events immediately and then rate per
-// second. A rate of zero disables limiting.
 func New(ratePerSecond float64, burst int) *Limiter {
+	if ratePerSecond <= 0 || burst <= 0 {
+		ratePerSecond, burst = 0, 0
+	}
 	return &Limiter{rate: ratePerSecond, burst: float64(burst), buckets: map[string]*bucket{}, now: time.Now}
 }
 

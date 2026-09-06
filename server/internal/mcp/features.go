@@ -161,8 +161,8 @@ func (t *tools) notes(ctx context.Context, _ *sdk.CallToolRequest, in NotesIn) (
 	if t.st.Notes == nil {
 		return nil, out, nil
 	}
-	from, to, _ := stats.Window(rng, t.st.Now())
-	if out.Notes, err = t.st.Notes.Between(ctx, s.ID, from.UTC().Format("2006-01-02"), to.UTC().Format("2006-01-02")); err != nil {
+	fromDay, toDay := stats.DayRange(rng, t.st.Now())
+	if out.Notes, err = t.st.Notes.Between(ctx, s.ID, fromDay, toDay); err != nil {
 		return nil, out, err
 	}
 	return nil, out, nil
@@ -180,12 +180,6 @@ type AddNoteOut struct {
 	Note notes.Note `json:"note"`
 }
 
-// addNote is the one tool that writes.
-//
-// It is here because the thing an agent is best placed to do while looking at a
-// chart is explain it: "traffic tripled on the 14th, and you told me you posted
-// to Hacker News that morning". A note is also the safest possible write —
-// additive, dated, deletable, and incapable of changing a measurement.
 func (t *tools) addNote(ctx context.Context, _ *sdk.CallToolRequest, in AddNoteIn) (*sdk.CallToolResult, AddNoteOut, error) {
 	if !canWrite(ctx) {
 		return nil, AddNoteOut{}, fmt.Errorf("this credential is read-only; mint a token with the write scope in Settings to record annotations")

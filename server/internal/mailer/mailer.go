@@ -185,15 +185,12 @@ func (m *Mailer) compose(msg Message) []byte {
 	return []byte(b.String())
 }
 
-// crlf normalises line endings and dot-stuffs, which SMTP requires of any
-// line that would otherwise look like the end of the message.
+// crlf normalises line endings to CRLF.
+//
+// It deliberately does not dot-stuff: smtp.Client.Data returns a
+// textproto.DotWriter, which does that already. Doing it here as well sent
+// every line starting with a dot with two of them.
 func crlf(s string) string {
 	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		if strings.HasPrefix(l, ".") {
-			lines[i] = "." + l
-		}
-	}
-	return strings.Join(lines, "\r\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
 }

@@ -17,6 +17,11 @@ services:
         required: false
     environment:
       GLANCE_DATABASE_PATH: /data/glance.db
+      # Traefik terminates in front of Glance and appends the address it saw to
+      # X-Forwarded-For, so exactly one hop is trustworthy. Without this the
+      # visitor hash would be built from Traefik's own address and every
+      # visitor would look like the same person.
+      GLANCE_TRUSTED_PROXY_HOPS: "1"
     networks:
       - dokploy-network
 

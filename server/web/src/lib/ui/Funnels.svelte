@@ -33,7 +33,11 @@
             <span class="count">{fmtNum(s.visitors)}</span>
           </div>
           <div class="bar" aria-hidden="true">
-            <div class="fill" style="width: {Math.max(s.rate, 0.5)}%"></div>
+            <!-- Scaled rather than widened: transform is composited, so this
+                 does not trigger layout on every frame. The track clips the
+                 rounded ends, so the fill needs no radius of its own — which
+                 also avoids scaleX squashing one. -->
+            <div class="fill" style="transform: scaleX({Math.max(s.rate, 0.5) / 100})"></div>
           </div>
           <div class="meta">
             <span>{s.rate.toFixed(1)}% of step 1</span>
@@ -72,7 +76,7 @@
   .name { font: var(--up-type-ui); color: var(--up-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count { font: var(--up-type-ui-strong); color: var(--up-ink); font-variant-numeric: tabular-nums; }
   .bar { height: 8px; border-radius: 4px; background: var(--up-bg-hover); overflow: hidden; margin-top: 4px; }
-  .fill { height: 100%; border-radius: 4px; background: var(--up-accent); transition: width 240ms ease; }
+  .fill { height: 100%; width: 100%; background: var(--up-accent); transform-origin: left; transition: transform 240ms cubic-bezier(0.2, 0, 0, 1); }
   .meta { display: flex; justify-content: space-between; gap: 10px; font: var(--up-type-ui); color: var(--up-text-muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .drop { color: var(--up-text-muted); }
 </style>

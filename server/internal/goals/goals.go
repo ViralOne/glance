@@ -34,11 +34,11 @@ var ErrInvalid = errors.New("invalid goal")
 
 // Goal is one conversion definition.
 type Goal struct {
-	ID       string `json:"id"`
-	SiteID   string `json:"site_id"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Target   string `json:"target"`
+	ID     string `json:"id"`
+	SiteID string `json:"site_id"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
 	// Value is what one conversion is assumed to be worth in minor units,
 	// used when the event itself carries no value.
 	Value     int    `json:"value"`

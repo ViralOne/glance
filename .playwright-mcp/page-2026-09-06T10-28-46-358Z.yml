@@ -1,5 +1,0 @@
-- generic [active] [ref=f11e1]:
-  - heading "Glance snippet test" [level=1] [ref=f11e2]
-  - img "big block for LCP" [ref=f11e3]
-  - paragraph [ref=f11e4]:
-    - button "Fire signup event" [ref=f11e5]

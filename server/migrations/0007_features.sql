@@ -173,3 +173,8 @@ SELECT site_id, 'polar', access_token, server, product_ids, webhook_secret, conn
 FROM polar_connections;
 
 DROP TABLE polar_connections;
+
+-- Token scope. Everything minted before now stays read-only, which is what it
+-- was promised to be; a write token has to be minted deliberately. Writes are
+-- confined to annotations either way — no token can change a measurement.
+ALTER TABLE api_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'read';

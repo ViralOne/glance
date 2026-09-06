@@ -17,6 +17,9 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/ViralOne/glance/server/internal/funnels"
+	"github.com/ViralOne/glance/server/internal/goals"
+	"github.com/ViralOne/glance/server/internal/notes"
 	"github.com/ViralOne/glance/server/internal/revenue"
 	"github.com/ViralOne/glance/server/internal/searchconsole"
 	"github.com/ViralOne/glance/server/internal/sites"
@@ -31,6 +34,9 @@ type Stores struct {
 	Stats         *stats.Store
 	Search        *searchconsole.Store
 	Revenue       *revenue.Store
+	Goals         *goals.Store
+	Funnels       *funnels.Store
+	Notes         *notes.Store
 	Now           func() time.Time
 }
 
@@ -48,7 +54,9 @@ func NewServer(st Stores, version string) *sdk.Server {
 			"site_stats and breakdown accept filters, a map of dimension to key, which narrows everything to the visitors who matched every entry (a visitor who arrived from google.com and then browsed three pages contributes all three under ref=google.com; an empty ref means direct). Filtered views are computed from raw events, which are kept only for the retention period, so the answer may carry truncated=true with retention_days and previous_unavailable=true; say so rather than presenting a cut-short window as the full range. " +
 			"search_terms lists the Google search queries that brought clicks and impressions, from Search Console; it is only populated for sites the owner has connected, and Google's data trails by two to three days. " +
 			"revenue gives Polar sales for a site: totals, the previous window, a series, revenue per visitor, and revenue attributed to first-touch referrer, source, campaign, landing page, country and product. Revenue is net of discounts and tax, less refunds, in minor units (cents, pence) of the given currency; refunds reduce the day the order was placed. " +
-			"Attribution works like this: the site's snippet records each visitor's first referrer and landing URL in their own browser, the site passes them into the Polar checkout metadata, and Glance normalises them with the same rules as page views, so 'revenue by source' lines up with 'sources'. Orders placed before the site started passing attribution, and orders whose buyer arrived direct, both appear under the empty key; attributed_orders and unattributed_orders say how many of each there are, so do not read an empty-key total as 'direct traffic converts best' when most orders predate attribution.",
+			"Attribution works like this: the site's snippet records each visitor's first referrer and landing URL in their own browser, the site passes them into the checkout metadata, and Glance normalises them with the same rules as page views, so 'revenue by source' lines up with 'sources'. Orders placed before the site started passing attribution, and orders whose buyer arrived direct, both appear under the empty key; attributed_orders and unattributed_orders say how many of each there are, so do not read an empty-key total as 'direct traffic converts best' when most orders predate attribution. " +
+			"goals gives conversion counts and rates for events or pages the owner marked as goals. funnels gives ordered step-by-step drop-off; it reads raw events, so it is bounded by the retention period (truncated says so) and is measured within a single day, because visitor hashes are day-scoped and cannot be joined across days — a funnel answers 'of those who started today, how many finished today'. " +
+			"vitals gives Core Web Vitals from real page loads. crawlers lists search and AI crawlers by name; crawler hits are recorded separately and are never part of any visitor or pageview total, so never add them to traffic. notes are the owner's dated annotations and usually explain a spike; add_note is the only tool that writes, and it only records an annotation.",
 	})
 	t := &tools{st: st}
 	ro := &sdk.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: boolPtr(false)}
@@ -65,6 +73,19 @@ func NewServer(st Stores, version string) *sdk.Server {
 		Description: "The Google search queries that sent visitors to one site over a range, from Search Console, most clicked first, with impressions and average position. Empty when the site is not connected."}, t.searchTerms)
 	sdk.AddTool(s, &sdk.Tool{Name: "revenue", Title: "Revenue", Annotations: ro,
 		Description: "Polar revenue for one site over a range: totals and previous window (minor currency units, net of discounts, tax and refunds), a per-bucket series, revenue per visitor, and revenue by first-touch referrer, source, campaign, landing page, country and product. The empty key in a breakdown mixes direct buyers with orders that predate attribution; attributed_orders versus unattributed_orders tells you which dominates. Empty when the site is not connected."}, t.revenue)
+	sdk.AddTool(s, &sdk.Tool{Name: "goals", Title: "Goals and conversion rates", Annotations: ro,
+		Description: "Conversions and conversion rates for the goals the owner defined on one site: how many visitors fired an event or reached a page, as a count and as a percentage of visitors, with the summed value where one is set."}, t.goals)
+	sdk.AddTool(s, &sdk.Tool{Name: "funnels", Title: "Funnels", Annotations: ro,
+		Description: "Step-by-step drop-off for one site's saved funnels: visitors at each step who completed every earlier step first, the loss between steps, and the end-to-end conversion. Reads raw events, so the window may be truncated to the retention period, and each funnel is measured within a single day."}, t.funnels)
+	sdk.AddTool(s, &sdk.Tool{Name: "vitals", Title: "Core Web Vitals", Annotations: ro,
+		Description: "Core Web Vitals measured from real page loads on one site: LCP, INP, CLS, TTFB and FCP as p75 and p50, with Google's good/needs-improvement/poor rating, split by device and by page. Use this for 'is my site fast', not for traffic."}, t.vitals)
+	sdk.AddTool(s, &sdk.Tool{Name: "crawlers", Title: "Search and AI crawlers", Annotations: ro,
+		Description: "Which crawlers read one site and how often, by name: search engines like Googlebot and Bingbot, and AI crawlers like GPTBot, ClaudeBot and Perplexity. Set ai_only for just the model-feeding ones. These requests are never counted as visitors or pageviews."}, t.crawlers)
+	sdk.AddTool(s, &sdk.Tool{Name: "notes", Title: "Chart annotations", Annotations: ro,
+		Description: "The owner's dated annotations for one site, which usually explain a change in the numbers. Read these before concluding that a spike is unexplained."}, t.notes)
+	sdk.AddTool(s, &sdk.Tool{Name: "add_note", Title: "Add a chart annotation",
+		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: false, IdempotentHint: false, OpenWorldHint: boolPtr(false)},
+		Description: "Record a dated annotation on one site, to explain what happened on a day. This is the only tool that writes anything, and it cannot change a measurement. Use it when the owner tells you the reason for a change so the reason is there next time."}, t.addNote)
 	return s
 }
 
@@ -78,6 +99,23 @@ func Handler(s *sdk.Server, log *slog.Logger) http.Handler {
 }
 
 type tools struct{ st Stores }
+
+// writeKey carries "this caller may write" from the HTTP layer into a tool.
+//
+// It is a context value rather than a field on the server because one server
+// instance serves every caller: an admin session and a read-only API token hit
+// the same handler, and the decision belongs to the request.
+type writeKey struct{}
+
+// WithWrites marks a request as allowed to use the writing tools.
+func WithWrites(ctx context.Context, allowed bool) context.Context {
+	return context.WithValue(ctx, writeKey{}, allowed)
+}
+
+func canWrite(ctx context.Context) bool {
+	allowed, _ := ctx.Value(writeKey{}).(bool)
+	return allowed
+}
 
 func (t *tools) resolve(ctx context.Context, ref string) (sites.Site, error) {
 	ref = strings.TrimSpace(strings.ToLower(ref))

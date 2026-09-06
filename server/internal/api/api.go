@@ -252,7 +252,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/export", s.adminAuth(s.export))
 
 	// MCP (read-only) for AI agents: Streamable HTTP at /mcp.
-	mux.Handle("/mcp", s.mcpAuth(mcp.Handler(mcp.NewServer(mcp.Stores{RetentionDays: s.retentionDaysCtx, Sites: s.Sites, Stats: s.Stats, Search: s.searchStore(), Revenue: s.Revenue, Now: s.Now}, Version), s.Log)))
+	mux.Handle("/mcp", s.mcpAuth(mcp.Handler(mcp.NewServer(mcp.Stores{RetentionDays: s.retentionDaysCtx, Sites: s.Sites, Stats: s.Stats, Search: s.searchStore(), Revenue: s.Revenue, Goals: s.Goals, Funnels: s.Funnels, Notes: s.Notes, Now: s.Now}, Version), s.Log)))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "no such endpoint")
@@ -322,14 +322,21 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusNotFound, "mcp_disabled", "the MCP endpoint is turned off in Settings")
 			return
 		}
+		// serve dispatches with the caller's write permission attached, so a
+		// read-only token cannot reach the one tool that writes.
+		serve := func(canWrite bool) {
+			next.ServeHTTP(w, r.WithContext(mcp.WithWrites(r.Context(), canWrite)))
+		}
 		if tok := bearer(r); tok != "" {
 			if s.MCPToken != "" && auth.Equal(auth.Hash(tok), auth.Hash(s.MCPToken)) {
-				next.ServeHTTP(w, r)
+				// The environment token is the operator's own, set on the
+				// server itself, so it carries the operator's authority.
+				serve(true)
 				return
 			}
 			if s.Tokens != nil {
-				if _, ok := s.Tokens.Authenticate(r.Context(), tok); ok {
-					next.ServeHTTP(w, r)
+				if t, ok := s.Tokens.Authenticate(r.Context(), tok); ok {
+					serve(t.CanWrite())
 					return
 				}
 			}
@@ -340,7 +347,7 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "an MCP token (GLANCE_MCP_TOKEN) or admin login is required: Authorization: Bearer ...")
 			return
 		}
-		next.ServeHTTP(w, r)
+		serve(true)
 	})
 }
 
@@ -905,17 +912,18 @@ func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tokens": list, "env_token_set": s.MCPToken != ""})
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": list, "env_token_set": s.MCPToken != "", "scopes": []string{tokens.ScopeRead, tokens.ScopeWrite}})
 }
 
 func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Scope string `json:"scope"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	t, raw, err := s.Tokens.Create(r.Context(), in.Name)
+	t, raw, err := s.Tokens.Create(r.Context(), in.Name, in.Scope)
 	if err != nil {
 		s.fail(w, err)
 		return

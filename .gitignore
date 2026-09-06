@@ -9,3 +9,6 @@ data/
 .env
 .DS_Store
 bin/
+
+# Playwright MCP scratch output (snapshots, console logs) from local testing.
+.playwright-mcp/

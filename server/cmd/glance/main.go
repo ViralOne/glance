@@ -120,6 +120,7 @@ func run() error {
 		DB: db, Log: log, Sites: siteStore, Settings: st, Writer: writer, Stats: statsStore,
 		Favicons: fetcher, Admin: admin, Web: web.Handler(), TrustProxy: true, MCPToken: cfg.MCPToken,
 		TrustedProxyHops: cfg.TrustedProxyHops, AllowLocalEvents: cfg.AllowLocalEvents,
+		SnippetPath: cfg.SnippetPath, CollectPath: cfg.CollectPath,
 		CollectLimiter: ratelimit.New(cfg.CollectPerSecond, cfg.CollectBurst),
 		LoginLimiter:   ratelimit.New(loginPerSecond, loginBurst),
 		Geo:            geoDB,

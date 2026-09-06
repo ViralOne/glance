@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -52,10 +53,24 @@ var Version = "dev"
 //go:embed glance.js
 var snippet []byte
 
-var snippetETag = func() string {
-	sum := sha256.Sum256(snippet)
-	return `"` + hex.EncodeToString(sum[:8]) + `"`
-}()
+// defaultCollectPath is the literal the snippet carries, and the string
+// rewritten when the operator chose a different one.
+const defaultCollectPath = "/api/v1/collect"
+
+// snippetFor returns the script to serve, with the collect path rewritten when
+// one was configured. Rewriting the bytes rather than adding an attribute to
+// the tag means an existing page needs no edit to follow a path change.
+func (s *Server) snippetFor() ([]byte, string) {
+	s.snippetOnce.Do(func() {
+		body := snippet
+		if p := aliasPath(s.CollectPath, defaultCollectPath); p != "" {
+			body = bytes.ReplaceAll(snippet, []byte(defaultCollectPath), []byte(p))
+		}
+		sum := sha256.Sum256(body)
+		s.snippetBody, s.snippetETag = body, `"`+hex.EncodeToString(sum[:8])+`"`
+	})
+	return s.snippetBody, s.snippetETag
+}
 
 // Server holds every dependency the handlers need.
 type Server struct {
@@ -74,6 +89,12 @@ type Server struct {
 	TrustProxy bool
 	// TrustedProxyHops is how many proxies sit in front of Glance; see clientIP.
 	TrustedProxyHops int
+	// SnippetPath and CollectPath serve the script and the ingest endpoint at
+	// an additional, operator-chosen path, so an ad blocker matching on
+	// "glance.js" or "/collect" does not silence measurement. Empty means the
+	// default paths only.
+	SnippetPath string
+	CollectPath string
 	// AllowLocalEvents accepts development page hosts from public clients.
 	// Off by default: the page host is client-supplied, so allowing it from
 	// anywhere bypasses the site-domain check for every site.
@@ -113,6 +134,10 @@ type Server struct {
 
 	rollMu   sync.Mutex
 	lastRoll time.Time
+
+	snippetOnce sync.Once
+	snippetBody []byte
+	snippetETag string
 }
 
 // searchStore is nil when no Google service is wired (tests).
@@ -164,11 +189,20 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 
-	// Public.
+	// Public. The script and the collector are also served at whatever paths
+	// the operator configured, because the default names are exactly what ad
+	// blockers match on; see Server.SnippetPath.
 	mux.HandleFunc("GET /glance.js", s.script)
 	mux.HandleFunc("GET /api/v1/theme", s.theme)
 	mux.HandleFunc("POST /api/v1/collect", s.collect)
 	mux.HandleFunc("OPTIONS /api/v1/collect", s.collectOptions)
+	if p := aliasPath(s.SnippetPath, "/glance.js"); p != "" {
+		mux.HandleFunc("GET "+p, s.script)
+	}
+	if p := aliasPath(s.CollectPath, "/api/v1/collect"); p != "" {
+		mux.HandleFunc("POST "+p, s.collect)
+		mux.HandleFunc("OPTIONS "+p, s.collectOptions)
+	}
 	// A shared dashboard is read-only and addressed by an unguessable slug,
 	// which is the only credential it has.
 	mux.HandleFunc("GET /api/v1/shared/{slug}", s.sharedStats)
@@ -263,6 +297,16 @@ func (s *Server) Handler() http.Handler {
 	return s.logging(mux)
 }
 
+// aliasPath returns path when it is a usable alias for def, else "". A path
+// equal to the default would register the same route twice, which panics.
+func aliasPath(path, def string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == def || !strings.HasPrefix(path, "/") {
+		return ""
+	}
+	return path
+}
+
 // ---- middleware ----
 
 func (s *Server) logging(next http.Handler) http.Handler {
@@ -354,6 +398,7 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 // ---- public: snippet and collect ----
 
 func (s *Server) script(w http.ResponseWriter, r *http.Request) {
+	body, etag := s.snippetFor()
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	// An hour of hard caching, then a day of serving the old copy while a new
 	// one is fetched in the background. A full day of max-age means a change to
@@ -361,13 +406,13 @@ func (s *Server) script(w http.ResponseWriter, r *http.Request) {
 	// to fix a measurement bug; stale-while-revalidate keeps the request off
 	// the critical path anyway.
 	w.Header().Set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400")
-	w.Header().Set("ETag", snippetETag)
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if r.Header.Get("If-None-Match") == snippetETag {
+	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	_, _ = w.Write(snippet)
+	_, _ = w.Write(body)
 }
 
 func cors(w http.ResponseWriter) {

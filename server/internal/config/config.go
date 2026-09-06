@@ -50,6 +50,19 @@ type Config struct {
 	// the MCP endpoint (/mcp). The admin login works there too.
 	MCPToken string
 
+	// SnippetPath and CollectPath are where the tracking script and the
+	// ingest endpoint are served, in addition to the defaults.
+	//
+	// This exists because of ad blockers. Filter lists match on URLs, and both
+	// "glance.js" and a path ending in "/collect" are the shape they look for;
+	// EasyPrivacy blocks generic analytics paths regardless of the host. The
+	// single most effective answer is to serve Glance from the same domain as
+	// the site it measures, so the request is first-party — a blocker will not
+	// break your own domain. Renaming the paths to something that is not
+	// obviously analytics closes most of the remaining gap.
+	SnippetPath string
+	CollectPath string
+
 	// GeoIPPath points at an optional MaxMind-format city database
 	// (GeoLite2-City.mmdb or DB-IP City Lite). Without it, location comes
 	// from the visitor's time zone and there are no cities.
@@ -88,6 +101,9 @@ func Load() (Config, error) {
 		TrustedProxyHops: 1,
 		CollectBurst:     120,
 		CollectPerSecond: 4,
+
+		SnippetPath: strings.TrimSpace(env("GLANCE_SNIPPET_PATH", "")),
+		CollectPath: strings.TrimSpace(env("GLANCE_COLLECT_PATH", "")),
 
 		GeoIPPath: strings.TrimSpace(env("GLANCE_GEOIP_PATH", "")),
 
@@ -165,6 +181,21 @@ func Load() (Config, error) {
 	}
 	if c.SMTPHost != "" && c.SMTPFrom == "" {
 		return c, fmt.Errorf("GLANCE_SMTP_FROM must be set when GLANCE_SMTP_HOST is")
+	}
+	for name, path := range map[string]*string{"GLANCE_SNIPPET_PATH": &c.SnippetPath, "GLANCE_COLLECT_PATH": &c.CollectPath} {
+		if *path == "" {
+			continue
+		}
+		if !strings.HasPrefix(*path, "/") || strings.ContainsAny(*path, "?# ") || len(*path) > 200 {
+			return c, fmt.Errorf("%s must be an absolute path with no query or fragment, got %q", name, *path)
+		}
+		// Reserving these would let a custom path shadow the dashboard or the
+		// admin API, which fails in a way that is hard to diagnose.
+		for _, reserved := range []string{"/api/", "/mcp", "/health", "/shared/", "/settings", "/sites"} {
+			if *path == strings.TrimSuffix(reserved, "/") || strings.HasPrefix(*path, reserved) {
+				return c, fmt.Errorf("%s must not start with %s, which Glance already serves", name, reserved)
+			}
+		}
 	}
 	if c.BaseURL != "" {
 		u, err := url.Parse(c.BaseURL)

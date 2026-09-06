@@ -28,9 +28,21 @@
   if (nav.webdriver) return;
   if (nav.doNotTrack === "1" || nav.globalPrivacyControl === true) return;
 
+  // Where to post. The origin is taken from the script's own URL rather than
+  // by stripping a known filename off it, because the script may be served
+  // from any path the operator chose (see GLANCE_SNIPPET_PATH). The path below
+  // is rewritten by the server when GLANCE_COLLECT_PATH is set, so a blocker
+  // matching "/api/v1/collect" can be sidestepped without touching the page.
+  var origin = s.getAttribute("data-api");
+  if (!origin) {
+    try {
+      origin = new URL(s.src).origin;
+    } catch (e) {
+      return;
+    }
+  }
   var endpoint =
-    (s.getAttribute("data-api") || s.src.replace(/\/glance\.js.*$/, "")) +
-    "/api/v1/collect";
+    origin.replace(/\/+$/, "") + (s.getAttribute("data-path") || "/api/v1/collect");
 
   // Vitals are opt-out rather than opt-in: they cost one PerformanceObserver
   // and describe the page rather than the person.

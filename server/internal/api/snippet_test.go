@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -98,5 +99,77 @@ func TestVitalsOnlyFlushIsNotAPageview(t *testing.T) {
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM vitals`).Scan(&vitals)
 	if vitals != 2 {
 		t.Fatalf("want 2 vitals rows, got %d", vitals)
+	}
+}
+
+// TestCustomPaths covers the ad-blocker workaround: the script and the
+// collector are served at operator-chosen paths as well as the defaults, and
+// the served script posts to the configured path without the page changing.
+func TestCustomPaths(t *testing.T) {
+	s := newServer(t, "", "")
+	s.SnippetPath = "/js/app.js"
+	s.CollectPath = "/i"
+	s.Now = func() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
+	h := s.Handler()
+
+	rr := do(t, h, "POST", "/api/v1/sites", map[string]any{"domain": "example.com"}, nil)
+	var site siteView
+	_ = json.Unmarshal(rr.Body.Bytes(), &site)
+
+	// The alias serves the script.
+	rr = do(t, h, "GET", "/js/app.js", nil, nil)
+	if rr.Code != 200 {
+		t.Fatalf("alias script: %d", rr.Code)
+	}
+	body := rr.Body.String()
+	// The minifier may quote with backticks, so match the path itself rather
+	// than a quoting style.
+	if !strings.Contains(body, "/i") {
+		t.Errorf("the served script should post to the configured path: %s", body[:200])
+	}
+	if strings.Contains(body, "/api/v1/collect") {
+		t.Error("the default collect path should have been rewritten out")
+	}
+	// The default path still works, so an existing page keeps measuring.
+	if rr := do(t, h, "GET", "/glance.js", nil, nil); rr.Code != 200 {
+		t.Fatalf("default script: %d", rr.Code)
+	}
+
+	// Both collect paths accept events.
+	for _, path := range []string{"/api/v1/collect", "/i"} {
+		b, _ := json.Marshal(map[string]any{"s": site.ID, "u": "https://example.com/x", "tz": "Europe/London"})
+		req := httptest.NewRequest("POST", path, strings.NewReader(string(b)))
+		req.RemoteAddr = "192.0.2.1:1"
+		req.Header.Set("User-Agent", chromeMac)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 202 {
+			t.Fatalf("%s: %d", path, rec.Code)
+		}
+	}
+	if err := s.Writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
+	if n != 2 {
+		t.Fatalf("want 2 events, got %d", n)
+	}
+}
+
+// TestAliasPathRefusesCollisions guards the router: registering an alias that
+// equals a route Glance already serves panics at start-up.
+func TestAliasPathRefusesCollisions(t *testing.T) {
+	if got := aliasPath("/glance.js", "/glance.js"); got != "" {
+		t.Errorf("an alias equal to the default must be ignored, got %q", got)
+	}
+	if got := aliasPath("", "/glance.js"); got != "" {
+		t.Errorf("empty: %q", got)
+	}
+	if got := aliasPath("relative.js", "/glance.js"); got != "" {
+		t.Errorf("a relative path is not a route, got %q", got)
+	}
+	if got := aliasPath("/js/app.js", "/glance.js"); got != "/js/app.js" {
+		t.Errorf("got %q", got)
 	}
 }

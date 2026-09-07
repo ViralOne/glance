@@ -46,20 +46,24 @@ type Site struct {
 	// your own visits do not register as traffic.
 	ExcludePaths []string `json:"exclude_paths"`
 	ExcludeIPs   []string `json:"exclude_ips"`
-	CreatedAt    string   `json:"created_at"`
-	UpdatedAt    string   `json:"updated_at"`
+	// ExcludeLocalTraffic drops development-host events before storage, keeping
+	// them out of realtime views, rollups, alerts, exports, and MCP responses.
+	ExcludeLocalTraffic bool   `json:"exclude_local_traffic"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 // Input is the writable subset of a site.
 type Input struct {
-	Name         *string   `json:"name"`
-	Domain       *string   `json:"domain"`
-	HomeCountry  *string   `json:"home_country"`
-	Accent       *string   `json:"accent"`
-	DefaultRange *string   `json:"default_range"`
-	Domains      *[]string `json:"domains"`
-	ExcludePaths *[]string `json:"exclude_paths"`
-	ExcludeIPs   *[]string `json:"exclude_ips"`
+	Name                *string   `json:"name"`
+	Domain              *string   `json:"domain"`
+	HomeCountry         *string   `json:"home_country"`
+	Accent              *string   `json:"accent"`
+	DefaultRange        *string   `json:"default_range"`
+	Domains             *[]string `json:"domains"`
+	ExcludePaths        *[]string `json:"exclude_paths"`
+	ExcludeIPs          *[]string `json:"exclude_ips"`
+	ExcludeLocalTraffic *bool     `json:"exclude_local_traffic"`
 }
 
 // MatchesHost reports whether host may send events for this site: its own
@@ -149,14 +153,15 @@ type Store struct {
 // New returns a Store.
 func New(db *sql.DB) *Store { return &Store{db: db, byID: map[string]Site{}} }
 
-const cols = `id, name, domain, home_country, accent, default_range, favicon IS NOT NULL, position, exclude_paths, exclude_ips, created_at, updated_at`
+const cols = `id, name, domain, home_country, accent, default_range, favicon IS NOT NULL, position, exclude_paths, exclude_ips, exclude_local_traffic, created_at, updated_at`
 
 func scan(row interface{ Scan(...any) error }) (Site, error) {
 	var s Site
-	var fav int
+	var fav, excludeLocal int
 	var paths, ips string
-	err := row.Scan(&s.ID, &s.Name, &s.Domain, &s.HomeCountry, &s.Accent, &s.DefaultRange, &fav, &s.Position, &paths, &ips, &s.CreatedAt, &s.UpdatedAt)
+	err := row.Scan(&s.ID, &s.Name, &s.Domain, &s.HomeCountry, &s.Accent, &s.DefaultRange, &fav, &s.Position, &paths, &ips, &excludeLocal, &s.CreatedAt, &s.UpdatedAt)
 	s.HasFavicon = fav == 1
+	s.ExcludeLocalTraffic = excludeLocal == 1
 	s.ExcludePaths, s.ExcludeIPs = splitLines(paths), splitLines(ips)
 	s.Domains = []string{}
 	return s, err
@@ -278,6 +283,9 @@ func (s *Store) Create(ctx context.Context, in Input) (Site, error) {
 			return Site{}, err
 		}
 	}
+	if in.ExcludeLocalTraffic != nil {
+		site.ExcludeLocalTraffic = *in.ExcludeLocalTraffic
+	}
 	if in.Domains != nil {
 		if site.Domains, err = validDomains(*in.Domains, site.Domain); err != nil {
 			return Site{}, err
@@ -293,10 +301,10 @@ func (s *Store) Create(ctx context.Context, in Input) (Site, error) {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) + 1 FROM sites`).Scan(&site.Position); err != nil {
 		return Site{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO sites (id, name, domain, home_country, accent, default_range, exclude_paths, exclude_ips, position, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO sites (id, name, domain, home_country, accent, default_range, exclude_paths, exclude_ips, exclude_local_traffic, position, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		site.ID, site.Name, site.Domain, site.HomeCountry, site.Accent, site.DefaultRange,
-		joinLines(site.ExcludePaths), joinLines(site.ExcludeIPs), site.Position, site.CreatedAt, site.UpdatedAt)
+		joinLines(site.ExcludePaths), joinLines(site.ExcludeIPs), site.ExcludeLocalTraffic, site.Position, site.CreatedAt, site.UpdatedAt)
 	if database.IsUniqueViolation(err) {
 		return Site{}, fmt.Errorf("%w: %s is already tracked", ErrInvalid, d)
 	}
@@ -360,6 +368,9 @@ func (s *Store) Update(ctx context.Context, id string, in Input) (Site, error) {
 			return Site{}, err
 		}
 	}
+	if in.ExcludeLocalTraffic != nil {
+		site.ExcludeLocalTraffic = *in.ExcludeLocalTraffic
+	}
 	if in.Domains != nil {
 		if site.Domains, err = validDomains(*in.Domains, site.Domain); err != nil {
 			return Site{}, err
@@ -371,9 +382,9 @@ func (s *Store) Update(ctx context.Context, id string, in Input) (Site, error) {
 		return Site{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `UPDATE sites SET name=?, domain=?, home_country=?, accent=?, default_range=?, exclude_paths=?, exclude_ips=?, updated_at=? WHERE id=?`,
+	_, err = tx.ExecContext(ctx, `UPDATE sites SET name=?, domain=?, home_country=?, accent=?, default_range=?, exclude_paths=?, exclude_ips=?, exclude_local_traffic=?, updated_at=? WHERE id=?`,
 		site.Name, site.Domain, site.HomeCountry, site.Accent, site.DefaultRange,
-		joinLines(site.ExcludePaths), joinLines(site.ExcludeIPs), site.UpdatedAt, site.ID)
+		joinLines(site.ExcludePaths), joinLines(site.ExcludeIPs), site.ExcludeLocalTraffic, site.UpdatedAt, site.ID)
 	if database.IsUniqueViolation(err) {
 		return Site{}, fmt.Errorf("%w: %s is already tracked", ErrInvalid, site.Domain)
 	}

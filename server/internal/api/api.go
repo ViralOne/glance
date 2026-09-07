@@ -496,6 +496,11 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
+	if site.ExcludeLocalTraffic && enrich.LocalHost(host) {
+		s.Log.Debug("collect.dropped", "reason", "local development traffic excluded by site settings", "host", host)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if site.ExcludesPath(path) {
 		s.Log.Debug("collect.dropped", "reason", "path excluded by site settings", "path", path)
 		w.WriteHeader(http.StatusAccepted)

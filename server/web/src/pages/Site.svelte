@@ -8,6 +8,7 @@
   import Icon from '../lib/ui/Icon.svelte'
   import Segment from '../lib/ui/Segment.svelte'
   import Swatches from '../lib/ui/Swatches.svelte'
+  import Switch from '../lib/ui/Switch.svelte'
   import MetricStat from '../lib/ui/MetricStat.svelte'
   import BarList, { type BarRow } from '../lib/ui/BarList.svelte'
   import Manage from '../lib/ui/Manage.svelte'
@@ -570,6 +571,13 @@
       <div class="setting">
         <div class="text"><div class="label">Domain</div><div class="hint">Events from other hosts are ignored</div></div>
         <div class="ctl"><Input value={site.domain} aria-label="Domain" oninput={(e) => save({ domain: e.currentTarget.value }, 'domain')} /></div>
+      </div>
+      <div class="setting">
+        <div class="text">
+          <div class="label">Ignore local development traffic</div>
+          <div class="hint">Drops future visits from localhost, loopback, private networks, and .local or .test hosts before they reach analytics.</div>
+        </div>
+        <Switch checked={site.exclude_local_traffic} label="Ignore local development traffic" onchange={(v) => save({ exclude_local_traffic: v }, 'exclude_local_traffic')} />
       </div>
       <div class="setting">
         <div class="text"><div class="label">Default date range</div><div class="hint">The range this dashboard opens on, remembered for {site.name}</div></div>

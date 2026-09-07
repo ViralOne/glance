@@ -108,6 +108,8 @@ export interface Site {
   exclude_paths: string[]
   /** Addresses or CIDR blocks to ignore, so your own visits do not count. */
   exclude_ips: string[]
+  /** Drops localhost and other development-host traffic before it is stored. */
+  exclude_local_traffic: boolean
   created_at: string
   updated_at: string
   card: SiteCard
@@ -419,7 +421,7 @@ export const api = {
   sites: () => request<{ sites: Site[] }>('GET', '/api/v1/sites'),
   site: (id: string) => request<Site>('GET', `/api/v1/sites/${id}`),
   createSite: (input: { name?: string; domain: string }) => request<Site>('POST', '/api/v1/sites', input),
-  updateSite: (id: string, patch: Partial<Pick<Site, 'name' | 'domain' | 'home_country' | 'accent' | 'default_range' | 'domains' | 'exclude_paths' | 'exclude_ips'>>) => request<Site>('PATCH', `/api/v1/sites/${id}`, patch),
+  updateSite: (id: string, patch: Partial<Pick<Site, 'name' | 'domain' | 'home_country' | 'accent' | 'default_range' | 'domains' | 'exclude_paths' | 'exclude_ips' | 'exclude_local_traffic'>>) => request<Site>('PATCH', `/api/v1/sites/${id}`, patch),
   deleteSite: (id: string) => request<void>('DELETE', `/api/v1/sites/${id}`),
   reorderSites: (ids: string[]) => request<{ sites: Site[] }>('POST', '/api/v1/sites/reorder', { ids }),
   refreshFavicon: (id: string) => request<Site>('POST', `/api/v1/sites/${id}/refresh-favicon`),

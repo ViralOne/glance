@@ -18,15 +18,41 @@
 (function () {
   var d = document,
     s = d.currentScript,
-    i = s && s.getAttribute("data-site");
-  if (!i) return;
+    i = s && s.getAttribute("data-site"),
+    debugEnabled = !!(s && s.hasAttribute("data-debug"));
+
+  // Debugging is entirely local to the browser console: it adds no requests
+  // and never prints the site id, endpoint, page URL, referrer, or event body.
+  function debugLog(message, detail) {
+    if (!debugEnabled) return;
+    try {
+      if (detail === undefined) console.debug("[Glance] " + message);
+      else console.debug("[Glance] " + message, detail);
+    } catch (e) {}
+  }
+
+  if (!i) {
+    debugLog("disabled: missing data-site");
+    return;
+  }
+  debugLog("starting");
 
   // Opting out is checked first and covers everything below: an opted-out
   // visitor is not measured, not sampled for vitals, and not given an
   // attribution record.
   var nav = navigator;
-  if (nav.webdriver) return;
-  if (nav.doNotTrack === "1" || nav.globalPrivacyControl === true) return;
+  if (nav.webdriver) {
+    debugLog("disabled: webdriver");
+    return;
+  }
+  if (nav.doNotTrack === "1") {
+    debugLog("disabled: Do Not Track");
+    return;
+  }
+  if (nav.globalPrivacyControl === true) {
+    debugLog("disabled: Global Privacy Control");
+    return;
+  }
 
   // Where to post. The origin is taken from the script's own URL rather than
   // by stripping a known filename off it, because the script may be served
@@ -38,11 +64,13 @@
     try {
       origin = new URL(s.src).origin;
     } catch (e) {
+      debugLog("disabled: collector URL could not be resolved");
       return;
     }
   }
   var endpoint =
     origin.replace(/\/+$/, "") + (s.getAttribute("data-path") || "/api/v1/collect");
+  debugLog("collector ready");
 
   // Vitals are opt-out rather than opt-in: they cost one PerformanceObserver
   // and describe the page rather than the person.
@@ -56,6 +84,7 @@
 
   function send(body) {
     var json = JSON.stringify(body);
+    debugLog("delivery attempt");
     try {
       fetch(endpoint, {
         method: "POST",
@@ -66,15 +95,32 @@
         headers: { "Content-Type": "text/plain" },
         mode: "cors",
         credentials: "omit",
-      }).catch(beacon);
+      }).then(
+        function (response) {
+          debugLog("collector responded", response.status);
+          if (!response.ok) beacon();
+        },
+        function () {
+          debugLog("fetch failed; trying beacon");
+          beacon();
+        }
+      );
       return;
-    } catch (e) {}
+    } catch (e) {
+      debugLog("fetch threw; trying beacon");
+    }
     beacon();
 
     function beacon() {
       try {
-        if (nav.sendBeacon) nav.sendBeacon(endpoint, json);
-      } catch (e) {}
+        if (!nav.sendBeacon) {
+          debugLog("sendBeacon unavailable");
+          return;
+        }
+        debugLog(nav.sendBeacon(endpoint, json) ? "beacon queued" : "beacon rejected");
+      } catch (e) {
+        debugLog("beacon failed");
+      }
     }
   }
 

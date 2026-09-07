@@ -77,6 +77,14 @@ what it was worth.
 
 **Single-page apps** are handled: the snippet re-sends on `pushState` and `popstate`.
 
+**Debugging the snippet.** Add the boolean `data-debug` attribute while troubleshooting:
+
+```html
+<script defer src="https://glance.example.com/glance.js" data-site="site_…" data-debug></script>
+```
+
+Glance then writes fixed, payload-free delivery messages to the browser console: startup or privacy opt-out, fetch response status, and beacon fallback. It makes no extra network requests and never logs the site id, collector URL, page URL, referrer, or event body. A `202` only confirms transport because the public collector deliberately gives accepted and dropped payloads the same response. Remove the attribute after troubleshooting.
+
 **Testing locally.** Pages served from `localhost`, `127.0.0.1`, `*.localhost`, `*.local`, `*.test` or a private LAN address are accepted for every site, so you can try the snippet on a dev server before deploying. Enable **Ignore local development traffic** in that site's settings when you want future development visits excluded from realtime views, rollups, alerts, exports, and MCP responses. The switch cannot remove past local visits because Glance intentionally does not retain the page hostname or client IP. Anything else must match the site's domain or a subdomain of it. Run with `GLANCE_LOG_LEVEL=debug` to see why an event was dropped.
 
 **What is dropped.** Browsers with `navigator.webdriver` set, visitors sending

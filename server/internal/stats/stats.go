@@ -4,6 +4,7 @@ package stats
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sort"
 	"time"
 )
@@ -443,9 +444,10 @@ func (s *Store) Card(ctx context.Context, siteID string, now time.Time) (SiteCar
 // Live is the realtime picture: distinct visitors in the last five minutes,
 // by country, plus the most recent hits so the UI can animate arrivals.
 type Live struct {
-	Total     int       `json:"total"`
-	Countries []Row     `json:"countries"`
-	Recent    []LiveHit `json:"recent"`
+	Total        int       `json:"total"`
+	Countries    []Row     `json:"countries"`
+	Recent       []LiveHit `json:"recent"`
+	LastActivity string    `json:"last_activity"`
 	// Minutes holds distinct visitors per minute for the last 30 minutes,
 	// oldest first, and Total30 the distinct visitors across them.
 	Minutes []int `json:"minutes"`
@@ -459,14 +461,21 @@ type LiveHit struct {
 	Path    string `json:"path"`
 }
 
+// liveHuman is fail-closed for future event kinds and excludes malformed
+// legacy rows that never received a visitor hash.
+const liveHuman = `kind IN ('pageview','event') AND visitor != ''`
+
 // LiveSnapshot reads the last five minutes of raw events for a site.
 func (s *Store) LiveSnapshot(ctx context.Context, siteID string, now time.Time) (Live, error) {
 	since := now.UTC().Add(-5 * time.Minute).Format("2006-01-02T15:04:05")
 	out := Live{Countries: []Row{}, Recent: []LiveHit{}}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ?`, siteID, since).Scan(&out.Total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ? AND `+liveHuman, siteID, since).Scan(&out.Total); err != nil {
 		return out, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT country, COUNT(DISTINCT visitor), COUNT(*) FROM events WHERE site_id = ? AND ts >= ? GROUP BY country ORDER BY COUNT(DISTINCT visitor) DESC`, siteID, since)
+	if err := s.db.QueryRowContext(ctx, `SELECT last_human_at FROM site_activity WHERE site_id = ?`, siteID).Scan(&out.LastActivity); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return out, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT country, COUNT(DISTINCT visitor), SUM(kind = 'pageview') FROM events WHERE site_id = ? AND ts >= ? AND `+liveHuman+` GROUP BY country ORDER BY COUNT(DISTINCT visitor) DESC`, siteID, since)
 	if err != nil {
 		return out, err
 	}
@@ -479,7 +488,7 @@ func (s *Store) LiveSnapshot(ctx context.Context, siteID string, now time.Time) 
 		out.Countries = append(out.Countries, r)
 	}
 	rows.Close()
-	rows, err = s.db.QueryContext(ctx, `SELECT ts, country, path FROM events WHERE site_id = ? AND ts >= ? AND kind = 'pageview' ORDER BY ts DESC LIMIT 20`, siteID, since)
+	rows, err = s.db.QueryContext(ctx, `SELECT ts, country, path FROM events WHERE site_id = ? AND ts >= ? AND kind = 'pageview' AND visitor != '' ORDER BY ts DESC LIMIT 20`, siteID, since)
 	if err != nil {
 		return out, err
 	}
@@ -496,7 +505,7 @@ func (s *Store) LiveSnapshot(ctx context.Context, siteID string, now time.Time) 
 	// Per-minute visitors for the last 30 minutes.
 	start := now.UTC().Truncate(time.Minute).Add(-29 * time.Minute)
 	out.Minutes = make([]int, 30)
-	rows, err = s.db.QueryContext(ctx, `SELECT substr(ts, 1, 16), COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ? GROUP BY substr(ts, 1, 16)`, siteID, start.Format("2006-01-02T15:04:05"))
+	rows, err = s.db.QueryContext(ctx, `SELECT substr(ts, 1, 16), COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ? AND `+liveHuman+` GROUP BY substr(ts, 1, 16)`, siteID, start.Format("2006-01-02T15:04:05"))
 	if err != nil {
 		return out, err
 	}
@@ -514,7 +523,7 @@ func (s *Store) LiveSnapshot(ctx context.Context, siteID string, now time.Time) 
 		}
 	}
 	rows.Close()
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ?`, siteID, start.Format("2006-01-02T15:04:05")).Scan(&out.Total30); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ? AND `+liveHuman, siteID, start.Format("2006-01-02T15:04:05")).Scan(&out.Total30); err != nil {
 		return out, err
 	}
 	return out, nil
@@ -523,6 +532,6 @@ func (s *Store) LiveSnapshot(ctx context.Context, siteID string, now time.Time) 
 // LiveVisitors counts distinct visitors seen in the last five minutes from raw events.
 func (s *Store) LiveVisitors(ctx context.Context, siteID string, now time.Time) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ?`, siteID, now.UTC().Add(-5*time.Minute).Format("2006-01-02T15:04:05")).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT visitor) FROM events WHERE site_id = ? AND ts >= ? AND `+liveHuman, siteID, now.UTC().Add(-5*time.Minute).Format("2006-01-02T15:04:05")).Scan(&n)
 	return n, err
 }

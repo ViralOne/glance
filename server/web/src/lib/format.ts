@@ -53,6 +53,22 @@ export function fmtPoint(iso: string, bucket: 'hour' | 'day', range: string): st
 export const fmtDay = (iso: string) => short.format(new Date(iso))
 export const fmtDayHour = (iso: string) => dayHour.format(new Date(iso))
 
+/** Compact age for live activity, e.g. "just now", "42s ago", "3h ago". */
+export function fmtAgo(iso: string, now = Date.now()): string {
+  const at = new Date(iso).getTime()
+  if (!Number.isFinite(at)) return ''
+  const seconds = Math.max(0, Math.floor((now - at) / 1000))
+  if (seconds < 10) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  return new Date(iso).toLocaleDateString()
+}
+
 export const RANGE_LABEL: Record<string, string> = { '24h': '24h', '48h': '48h', '7d': '7d', '30d': '30d', '90d': '90d', '180d': '180d' }
 export const RANGE_START: Record<string, string> = {
   '24h': '24 hours ago',

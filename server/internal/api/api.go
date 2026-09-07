@@ -74,14 +74,15 @@ func (s *Server) snippetFor() ([]byte, string) {
 
 // Server holds every dependency the handlers need.
 type Server struct {
-	DB       *sql.DB
-	Log      *slog.Logger
-	Sites    *sites.Store
-	Settings *settings.Store
-	Writer   *events.Writer
-	Stats    *stats.Store
-	Favicons *favicons.Fetcher
-	Admin    *auth.Admin
+	DB        *sql.DB
+	Log       *slog.Logger
+	Sites     *sites.Store
+	Settings  *settings.Store
+	Writer    *events.Writer
+	Stats     *stats.Store
+	Collector *CollectorDiagnostics
+	Favicons  *favicons.Fetcher
+	Admin     *auth.Admin
 	// AdminStore persists the credential when it is not pinned by the
 	// environment, so it can be changed from the dashboard.
 	AdminStore *auth.Store
@@ -189,6 +190,9 @@ func (s *Server) Handler() http.Handler {
 	if s.Now == nil {
 		s.Now = time.Now
 	}
+	if s.Collector == nil {
+		s.Collector = &CollectorDiagnostics{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 
@@ -281,6 +285,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/favicon", s.adminAuth(s.refFavicon))
 	mux.Handle("GET /api/v1/status", s.adminAuth(s.status))
+	mux.Handle("GET /api/v1/diagnostics", s.adminSession(s.collectorDiagnostics))
 	mux.Handle("GET /api/v1/settings", s.adminAuth(s.getSettings))
 	mux.Handle("PATCH /api/v1/settings", s.adminAuth(s.updateSettings))
 	mux.Handle("GET /api/v1/tokens", s.adminAuth(s.listTokens))
@@ -346,6 +351,19 @@ func (s *Server) adminAuth(next http.HandlerFunc) http.Handler {
 				return
 			}
 		}
+		if !s.Admin.Authorized(r) {
+			writeError(w, http.StatusUnauthorized, "login_required", "sign in to Glance")
+			return
+		}
+		next(w, r)
+	})
+}
+
+// adminSession protects operational diagnostics from read-only API tokens.
+// An authenticated administrator (or an intentionally auth-disabled instance)
+// may read them; collector clients and agent tokens may not.
+func (s *Server) adminSession(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.Admin.Authorized(r) {
 			writeError(w, http.StatusUnauthorized, "login_required", "sign in to Glance")
 			return
@@ -467,6 +485,7 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	ip := s.clientIP(r)
 	if !s.CollectLimiter.Allow(ip) {
+		s.Collector.drop(dropRateLimited)
 		s.Log.Debug("collect.dropped", "reason", "rate limited")
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -474,6 +493,7 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	// Honour Do Not Track and Global Privacy Control. The snippet already
 	// checks both, but a proxy or extension may set them instead.
 	if enrich.OptedOut(r.Header) {
+		s.Collector.drop(dropPrivacySignal)
 		s.Log.Debug("collect.dropped", "reason", "dnt or gpc")
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -481,32 +501,39 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	var in collectBody
 	b, err := io.ReadAll(io.LimitReader(r.Body, 8192))
 	if err != nil || json.Unmarshal(b, &in) != nil {
+		s.Collector.drop(dropInvalidBody)
+		s.Log.Debug("collect.dropped", "reason", "invalid body")
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	site, ok := s.Sites.Lookup(r.Context(), strings.TrimSpace(in.Site))
 	if !ok {
+		s.Collector.drop(dropUnknownSite)
 		s.Log.Debug("collect.dropped", "reason", "unknown site", "site", in.Site)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	path, host := enrich.Path(in.URL)
 	if !s.hostAllowed(host, site, ip) {
+		s.Collector.drop(dropHostMismatch)
 		s.Log.Debug("collect.dropped", "reason", "host does not match site domain", "host", host, "domain", site.Domain)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	if site.ExcludeLocalTraffic && enrich.LocalHost(host) {
+		s.Collector.drop(dropLocalExclusion)
 		s.Log.Debug("collect.dropped", "reason", "local development traffic excluded by site settings", "host", host)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	if site.ExcludesPath(path) {
+		s.Collector.drop(dropPathExclusion)
 		s.Log.Debug("collect.dropped", "reason", "path excluded by site settings", "path", path)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	if site.ExcludesIP(ip) {
+		s.Collector.drop(dropIPExclusion)
 		s.Log.Debug("collect.dropped", "reason", "ip excluded by site settings")
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -521,11 +548,13 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 			SiteID: site.ID, At: now, Kind: events.KindBot, Name: ua.BotName, Path: path,
 			Country: enrich.Country(r.Header, in.TZ), Visitor: "",
 		})
+		s.Collector.accept()
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	salt, err := s.Settings.Salt(r.Context(), now)
 	if err != nil {
+		s.Collector.drop(dropProcessingError)
 		s.Log.Error("collect.salt_failed", "error", err.Error())
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -537,6 +566,7 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 		if in.Vitals != nil {
 			s.enqueueVitals(site.ID, path, ua.Device, now, in.Vitals)
 		}
+		s.Collector.accept()
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -564,6 +594,7 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 	if in.Vitals != nil && ev.Kind == events.KindPageview {
 		s.enqueueVitals(site.ID, path, ua.Device, now, in.Vitals)
 	}
+	s.Collector.accept()
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -1074,6 +1105,11 @@ func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- status & export ----
+
+func (s *Server) collectorDiagnostics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, s.Collector.snapshot())
+}
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	var sitesN, eventsN, dailyN int

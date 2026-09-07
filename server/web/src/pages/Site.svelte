@@ -3,7 +3,7 @@
   import { api, DEFAULT_RANGE, isRange, paymentsApi, RANGES, refIconURL, siteIconURL, type Dim, type Filters, type FunnelResult, type GoalResult, type GoogleStatus, type Live, type Note, type PaymentProvider, type PaymentsView, type Range, type Revenue, type RevenueDim, type Row, type SearchTerm, IMPORT_FORMATS, type Share, type ImportFormat, type ImportResult, type Site, type Summary, type Vitals } from '../lib/api'
   import { setAccentOverride } from '../lib/accent'
   import { copyText } from '../lib/clipboard'
-  import { countryName, flag, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
+  import { countryName, flag, fmtAgo, fmtDelta, fmtMoney, fmtNum, fmtRatio } from '../lib/format'
   import { pageIn, panel } from '../lib/motion'
   import Icon from '../lib/ui/Icon.svelte'
   import Segment from '../lib/ui/Segment.svelte'
@@ -78,6 +78,8 @@
   let LiveMap = $state<typeof import('../lib/map/LiveMap.svelte').default | null>(null)
   let mapView = $state<'live' | 'range'>('live')
   let liveData = $state<Live | null>(null)
+  const online = $derived(liveData?.total ?? live)
+  const lastActivity = $derived(liveData?.last_activity ? fmtAgo(liveData.last_activity) : '')
 
   // Google Search Console: connection status for the settings panel and
   // the search terms it feeds. Google's data trails by two to three days.
@@ -549,7 +551,9 @@
     <Icon src={site.has_favicon ? siteIconURL(site.id) : ''} size={22} />
     <span class="name">{site.name}</span>
     <span class="domain">{site.domain}</span>
-    {#if live > 0}<span class="live"><span class="dot"></span>{live} online</span>{/if}
+    <span class="live" class:idle={online === 0} title={liveData?.last_activity ? `Last human activity ${new Date(liveData.last_activity).toLocaleString()}` : 'No human activity recorded yet'}>
+      <span class="dot"></span>{online} online <span class="last">· {lastActivity ? `last activity ${lastActivity}` : 'no activity yet'}</span>
+    </span>
     <span class="spacer"></span>
     <div class="ranges"><Segment options={RANGES.map((r) => ({ value: r, label: r }))} value={range || DEFAULT_RANGE} gap={14} onchange={(r) => (range = r)} /></div>
     <button type="button" class="plain" class:on={settingsOpen} onclick={() => (settingsOpen = !settingsOpen)}>Settings</button>
@@ -1001,7 +1005,7 @@
         <div class="head">
           <div class="card-title">{mapView === 'live' ? 'Live' : 'Visitors by country'}</div>
           <div class="map-controls">
-            <span class="hint">{mapView === 'live' ? `${liveData?.total ?? live} online` : `${stats.breakdowns.country.length} ${stats.breakdowns.country.length === 1 ? 'country' : 'countries'}`}</span>
+            <span class="hint">{mapView === 'live' ? `${online} online${lastActivity ? ` · last activity ${lastActivity}` : ''}` : `${stats.breakdowns.country.length} ${stats.breakdowns.country.length === 1 ? 'country' : 'countries'}`}</span>
             <Segment options={[{ value: 'live', label: 'Live' }, { value: 'range', label: range }]} value={mapView} gap={14} onchange={(v) => (mapView = v)} />
           </div>
         </div>
@@ -1044,6 +1048,8 @@
   .name { font: var(--up-type-row-title); }
   .domain { font: var(--up-type-meta); color: var(--up-text-muted); }
   .live { display: flex; align-items: center; gap: 6px; font: var(--up-type-meta); color: var(--up-text-muted); margin-left: 6px; }
+  .live .last { color: var(--up-text-faint); }
+  .live.idle .dot { background: var(--up-border-control); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--up-accent); }
   .spacer { flex: 1; }
   .plain { background: none; border: none; padding: 0; cursor: pointer; font: var(--up-type-ui); color: var(--up-text-muted); }

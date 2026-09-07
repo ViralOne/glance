@@ -80,6 +80,8 @@ export interface Live {
   total: number
   countries: Row[]
   recent: { at: string; country: string; path: string }[]
+  /** Latest durably written human activity, retained after raw events expire. */
+  last_activity: string
   minutes: number[] // distinct visitors per minute, last 30, oldest first
   total_30m: number
 }
@@ -125,6 +127,23 @@ export interface AuthState {
   source?: 'generated' | 'set' | 'env'
   /** False when the environment owns the credential, since a restart would overwrite a change. */
   can_change?: boolean
+}
+
+export interface CollectorDiagnostics {
+  /** Payloads that passed collector validation; not a durable-write count. */
+  accepted: number
+  dropped: number
+  reasons: {
+    rate_limited: number
+    privacy_signal: number
+    invalid_body: number
+    unknown_site: number
+    host_mismatch: number
+    local_exclusion: number
+    path_exclusion: number
+    ip_exclusion: number
+    processing_error: number
+  }
 }
 
 export interface Status {
@@ -430,6 +449,7 @@ export const api = {
   // An empty range asks the server for the site's own default; the answer says which it used.
   stats: (id: string, range: Range | '', filters: Filters = {}) => request<{ site: Site; live: number; stats: Summary }>('GET', `/api/v1/sites/${id}/stats?range=${range}${filterQuery(filters)}`),
   status: () => request<Status>('GET', '/api/v1/status'),
+  diagnostics: () => request<CollectorDiagnostics>('GET', '/api/v1/diagnostics'),
   theme: () => request<{ accent: string; title: string }>('GET', '/api/v1/theme'),
   settings: () => request<GeneralSettings>('GET', '/api/v1/settings'),
   updateSettings: (patch: Partial<Omit<GeneralSettings, 'retention_from_env'>>) => request<GeneralSettings>('PATCH', '/api/v1/settings', patch),

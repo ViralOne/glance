@@ -1,6 +1,6 @@
 <script lang="ts">
   // General settings: account, appearance, MCP and API tokens, retention, export.
-  import { api, type Alert, type AlertChannel, type AlertKind, type AlertMetric, type AuthState, type GeneralSettings, type Status, type Token } from '../lib/api'
+  import { api, type Alert, type AlertChannel, type AlertKind, type AlertMetric, type AuthState, type CollectorDiagnostics, type GeneralSettings, type Status, type Token } from '../lib/api'
   import { copyText } from '../lib/clipboard'
   import { fmtNum } from '../lib/format'
   import { isHex, setBaseAccent } from '../lib/accent'
@@ -15,6 +15,7 @@
 
   let { ontitle, onsignedout }: { ontitle: (t: string) => void; onsignedout: (reason: string) => void } = $props()
   let status = $state<Status | null>(null)
+  let diagnostics = $state<CollectorDiagnostics | null>(null)
   let settings = $state<GeneralSettings | null>(null)
   let tokens = $state<Token[]>([])
   let tokenScope = $state<'read' | 'write'>('read')
@@ -144,10 +145,11 @@
 
   async function load() {
     try {
-      const [st, g, tk] = await Promise.all([api.status(), api.settings(), api.tokens()])
+      const [st, diag, g, tk] = await Promise.all([api.status(), api.diagnostics(), api.settings(), api.tokens()])
       loadAlerts()
       loadAuth()
       status = st
+      diagnostics = diag
       settings = g
       tokens = tk.tokens
       envToken = tk.env_token_set
@@ -209,6 +211,18 @@
   const mcpConfig = $derived(JSON.stringify({ mcpServers: { glance: { url: mcpURL, headers: { Authorization: `Bearer ${minted?.secret ?? 'glance_tok_…'}` } } } }, null, 2))
   const fmtBytes = (b: number) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GB' : b >= 1 << 20 ? (b / (1 << 20)).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB')
   const fmtUptime = (s: number) => (s >= 86400 ? `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h` : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m`)
+  const DIAGNOSTIC_REASONS = [
+    ['rate_limited', 'Rate limited'],
+    ['privacy_signal', 'DNT or GPC'],
+    ['invalid_body', 'Invalid body'],
+    ['unknown_site', 'Unknown site'],
+    ['host_mismatch', 'Host mismatch'],
+    ['local_exclusion', 'Local traffic'],
+    ['path_exclusion', 'Excluded path'],
+    ['ip_exclusion', 'Excluded IP'],
+    ['processing_error', 'Processing error'],
+  ] as const
+  const diagnosticRows = $derived(DIAGNOSTIC_REASONS.filter(([key]) => (diagnostics?.reasons[key] ?? 0) > 0))
 </script>
 
 {#if status && settings}
@@ -450,10 +464,24 @@
       </div>
       <a class="btn" href="/api/v1/export" download>Download</a>
     </div>
-    <div class="setting">
+    <div class="setting ingest">
       <div class="text">
         <div class="label">Ingest</div>
-        <div class="hint">{fmtNum(status.written)} events written since start{#if status.dropped > 0} · <span class="bad">{status.dropped} dropped when the queue was full</span>{/if}</div>
+        <div class="hint">{fmtNum(status.written)} rows durably written since start{#if status.dropped > 0} · <span class="bad">{status.dropped} lost when the queue was full</span>{/if}</div>
+        {#if diagnostics}
+          <div class="collector-summary">
+            <span><strong>{fmtNum(diagnostics.accepted)}</strong> passed validation</span>
+            <span class:bad={diagnostics.dropped > 0}><strong>{fmtNum(diagnostics.dropped)}</strong> rejected</span>
+            <span>resets on restart</span>
+          </div>
+          {#if diagnosticRows.length > 0}
+            <div class="diagnostic-reasons" aria-label="Collector rejection reasons">
+              {#each diagnosticRows as [key, label]}
+                <span><strong>{fmtNum(diagnostics.reasons[key])}</strong> {label}</span>
+              {/each}
+            </div>
+          {/if}
+        {/if}
       </div>
       <span class="hint">v{status.version}</span>
     </div>
@@ -475,6 +503,11 @@
   .name { font: var(--up-type-row-title); }
   .hint { font: var(--up-type-meta); color: var(--up-text-muted); line-height: 1.5; }
   .hint code { font: var(--up-type-code); }
+  .collector-summary { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 7px; font: var(--up-type-meta); color: var(--up-text-secondary); }
+  .collector-summary strong, .diagnostic-reasons strong { color: var(--up-ink); font-weight: 650; }
+  .diagnostic-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .diagnostic-reasons span { padding: 3px 7px; border: 1px solid var(--up-border-hairline); border-radius: var(--up-radius-pill); font: var(--up-type-meta); color: var(--up-text-muted); background: var(--up-bg-hover); }
+  .ingest .text { max-width: 760px; }
   .mono { font: var(--up-type-code); }
   .ctl { width: 220px; flex-shrink: 0; }
   .tokens { display: flex; flex-direction: column; gap: 10px; padding-top: 14px; }

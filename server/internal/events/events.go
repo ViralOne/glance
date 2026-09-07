@@ -237,14 +237,33 @@ func (w *Writer) writeBatch(b *batch) error {
 		if err != nil {
 			return err
 		}
+		lastHuman := map[string]time.Time{}
 		for _, e := range b.events {
 			if _, err := stmt.ExecContext(ctx, e.SiteID, ids.Format(e.At), e.Kind, e.Name, e.Path, e.RefHost, e.Country,
 				e.Device, e.Browser, e.OS, e.Region, e.City, e.UTMSrc, e.UTMCamp, e.UTMMedium, e.Visitor, e.Props, e.Value); err != nil {
 				stmt.Close()
 				return err
 			}
+			if e.Visitor != "" && (e.Kind == KindPageview || e.Kind == KindEvent) && e.At.After(lastHuman[e.SiteID]) {
+				lastHuman[e.SiteID] = e.At
+			}
 		}
 		stmt.Close()
+		if len(lastHuman) > 0 {
+			activity, err := tx.PrepareContext(ctx, `INSERT INTO site_activity (site_id, last_human_at) VALUES (?, ?)
+				ON CONFLICT(site_id) DO UPDATE SET last_human_at = excluded.last_human_at
+				WHERE excluded.last_human_at > site_activity.last_human_at`)
+			if err != nil {
+				return err
+			}
+			for siteID, at := range lastHuman {
+				if _, err := activity.ExecContext(ctx, siteID, ids.Format(at)); err != nil {
+					activity.Close()
+					return err
+				}
+			}
+			activity.Close()
+		}
 	}
 	if len(b.vitals) > 0 {
 		stmt, err := tx.PrepareContext(ctx, `INSERT INTO vitals (site_id, ts, path, device, metric, value) VALUES (?,?,?,?,?,?)`)
